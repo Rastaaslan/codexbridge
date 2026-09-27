@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
+import { downloadLinuxAsset } from "./tunnel-asset.mjs";
 const response = await fetch(
   "https://api.github.com/repos/openai/tunnel-client/releases/latest",
   { headers: { "User-Agent": "codexbridge" } },
@@ -15,18 +16,24 @@ const platform =
       ? "darwin"
       : "linux";
 const arch = process.arch === "arm64" ? "arm64" : "amd64";
-const name = `tunnel-client-${release.tag_name}-${platform}-${arch}.${platform === "windows" ? "zip" : "tar.gz"}`;
-const asset = release.assets.find((a) => a.name === name);
-if (!asset?.digest?.startsWith("sha256:"))
-  throw Error("No checksum-verified release asset for " + name);
-const download = await fetch(asset.browser_download_url);
-if (!download.ok) throw Error("Download HTTP " + download.status);
-const data = Buffer.from(await download.arrayBuffer());
-if (
-  "sha256:" + createHash("sha256").update(data).digest("hex") !==
-  asset.digest
-)
-  throw Error("Tunnel client checksum mismatch");
+let name, data, digest;
+if (platform === "linux") {
+  ({ name, data, digest } = await downloadLinuxAsset(release, arch));
+} else {
+  name = `tunnel-client-${release.tag_name}-${platform}-${arch}.${platform === "windows" ? "zip" : "tar.gz"}`;
+  const asset = release.assets.find((a) => a.name === name);
+  if (!asset?.digest?.startsWith("sha256:"))
+    throw Error("No checksum-verified release asset for " + name);
+  const download = await fetch(asset.browser_download_url);
+  if (!download.ok) throw Error("Download HTTP " + download.status);
+  data = Buffer.from(await download.arrayBuffer());
+  if (
+    "sha256:" + createHash("sha256").update(data).digest("hex") !==
+    asset.digest
+  )
+    throw Error("Tunnel client checksum mismatch");
+  digest = asset.digest;
+}
 const root = path.resolve(
   process.env.CODEXBRIDGE_HOME || ".codexbridge",
   "bin",
@@ -54,7 +61,7 @@ await writeFile(
     "tunnel-install.json",
   ),
   JSON.stringify(
-    { version: release.tag_name, checksum: asset.digest, root, files },
+    { version: release.tag_name, checksum: digest, root, files },
     null,
     2,
   ),
