@@ -1,0 +1,24 @@
+[Unit]
+Description=CodexBridge transactional release updater
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=codexbridge
+Group=codexbridge
+WorkingDirectory=/opt/codexbridge
+Environment=HOME=/var/lib/codexbridge
+Environment=CODEX_HOME=/var/lib/codexbridge/codex
+Environment=CODEXBRIDGE_HOME=/var/lib/codexbridge
+EnvironmentFile=/etc/codexbridge/environment
+ExecStart=/usr/bin/node /usr/local/lib/codexbridge/self-update.mjs
+TimeoutStartSec=3600
+Restart=on-failure
+RestartSec=15
+UMask=0077
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal

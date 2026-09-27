@@ -1,0 +1,29 @@
+[Unit]
+Description=CodexBridge persistent MCP tunnel supervisor
+Wants=network-online.target codexbridge.service
+After=network-online.target codexbridge.service
+
+[Service]
+Type=simple
+User=codexbridge
+Group=codexbridge
+WorkingDirectory=/opt/codexbridge/current
+Environment=HOME=/var/lib/codexbridge
+Environment=CODEX_HOME=/var/lib/codexbridge/codex
+Environment=CODEXBRIDGE_HOME=/var/lib/codexbridge
+EnvironmentFile=/etc/codexbridge/environment
+ExecStart=/usr/bin/node /opt/codexbridge/current/scripts/tunnel-supervisor.mjs
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

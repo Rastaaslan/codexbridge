@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "codexbridge": {
+      "command": "codexbridge",
+      "args": ["mcp-stdio"]
+    }
+  }
+}

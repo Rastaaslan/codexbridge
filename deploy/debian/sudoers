@@ -1,0 +1,2 @@
+# Exact argument lists; no wildcard, shell, env, arbitrary unit or sudo command.
+codexbridge ALL=(root) NOPASSWD: /usr/local/sbin/codexbridge-control start, /usr/local/sbin/codexbridge-control stop, /usr/local/sbin/codexbridge-control restart, /usr/local/sbin/codexbridge-control status, /usr/local/sbin/codexbridge-control is-active, /usr/local/sbin/codexbridge-control logs, /usr/local/sbin/codexbridge-control update

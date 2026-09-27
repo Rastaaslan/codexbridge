@@ -1,0 +1,19 @@
+services:
+  codexbridge:
+    build:
+      context: .
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-0.156.1}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3847:3847"
+    environment:
+      CODEXBRIDGE_HOME: /data
+    volumes:
+      - codexbridge-data:/data
+      - codexbridge-auth:/home/node/.codex
+      - ./repositories:/repos
+volumes:
+  codexbridge-data:
+  codexbridge-auth:

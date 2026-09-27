@@ -1,0 +1,30 @@
+[Unit]
+Description=CodexBridge orchestrator
+Wants=network-online.target
+After=network-online.target codexbridge-recover.service
+Requires=codexbridge-recover.service
+
+[Service]
+Type=simple
+User=codexbridge
+Group=codexbridge
+WorkingDirectory=/opt/codexbridge/current
+Environment=HOME=/var/lib/codexbridge
+Environment=CODEX_HOME=/var/lib/codexbridge/codex
+Environment=CODEXBRIDGE_HOME=/var/lib/codexbridge
+Environment=CODEXBRIDGE_MANAGED=1
+EnvironmentFile=/etc/codexbridge/environment
+ExecStart=/usr/bin/node /opt/codexbridge/current/dist/cli.js start
+Restart=always
+RestartSec=5
+TimeoutStopSec=90
+KillMode=control-group
+UMask=0077
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

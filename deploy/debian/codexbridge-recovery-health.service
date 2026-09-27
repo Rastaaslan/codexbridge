@@ -1,0 +1,23 @@
+[Unit]
+Description=Validate restored CodexBridge release after boot before resuming jobs
+Wants=codexbridge.service codexbridge-tunnel.service
+After=codexbridge.service codexbridge-tunnel.service
+
+[Service]
+Type=oneshot
+User=codexbridge
+Group=codexbridge
+Environment=HOME=/var/lib/codexbridge
+Environment=CODEXBRIDGE_HOME=/var/lib/codexbridge
+EnvironmentFile=/etc/codexbridge/environment
+ExecStart=/usr/bin/node /usr/local/lib/codexbridge/self-update.mjs --verify-recovery
+TimeoutStartSec=150
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

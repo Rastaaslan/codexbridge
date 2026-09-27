@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CodexBridge · Atelier</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <aside>
+      <a class="brand" href="/">c<span>↗</span> <b>CodexBridge</b></a>
+      <p class="eyebrow">VOTRE ATELIER LOCAL</p>
+      <button id="all" class="nav active">
+        ▦ &nbsp; Tous les travaux <span id="count">0</span>
+      </button>
+      <div class="aside-bottom">
+        <span class="dot"></span> Service autonome
+        <p>Du ticket au code validé.<br />Le contexte reste ici.</p>
+        <button id="logout" class="quiet">Verrouiller</button>
+      </div>
+    </aside>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">WORKSPACE / OVERVIEW</p>
+          <h1>Faites avancer vos projets<span>.</span></h1>
+          <p class="muted">
+            Codex implémente. Le reviewer vérifie. Vous gardez la décision.
+          </p>
+        </div>
+        <button id="new-job" class="primary">＋ Nouveau ticket</button>
+      </header>
+      <section id="login" class="panel">
+        <h2>Connecter votre atelier</h2>
+        <p>
+          Collez le jeton local affiché par <code>codexbridge token</code>. Il
+          reste en mémoire dans cet onglet.
+        </p>
+        <form id="login-form">
+          <input
+            id="token"
+            type="password"
+            placeholder="Jeton d’accès"
+            autocomplete="off"
+            required
+          /><button class="primary">Déverrouiller</button>
+        </form>
+      </section>
+      <div id="workspace" hidden>
+        <section class="stats">
+          <div>
+            <span class="eyebrow">EN COURS</span
+            ><strong id="active-count">0</strong
+            ><small>Une boucle, tout le contexte</small>
+          </div>
+          <div>
+            <span class="eyebrow">VOTRE DÉCISION</span
+            ><strong id="waiting-count">0</strong
+            ><small>Uniquement quand nécessaire</small>
+          </div>
+          <div>
+            <span class="eyebrow">PRÊTS À TESTER</span
+            ><strong id="ready-count">0</strong
+            ><small>Vérifiés par le reviewer</small>
+          </div>
+        </section>
+        <div class="section-heading">
+          <h2>Travaux récents</h2>
+          <span id="connection" class="muted">Actualisation automatique</span>
+        </div>
+        <div id="jobs"></div>
+        <section id="empty" class="panel empty" hidden>
+          <span class="empty-icon">↗</span>
+          <h2>Votre prochain changement commence ici.</h2>
+          <p class="muted">
+            Créez un ticket, choisissez un dépôt et laissez la boucle avancer.
+          </p>
+          <button id="empty-new" class="primary">
+            Créer un premier ticket
+          </button>
+        </section>
+        <section id="detail" class="panel" hidden></section>
+      </div>
+      <div id="notice" role="status" aria-live="polite"></div>
+      <dialog id="create-dialog">
+        <form id="create-form">
+          <div class="section-heading">
+            <h2>Nouveau ticket</h2>
+            <button type="button" id="close-dialog" class="quiet">
+              Fermer ×
+            </button>
+          </div>
+          <label
+            >Titre<input
+              name="title"
+              required
+              maxlength="200"
+              placeholder="Corriger le calcul du total" /></label
+          ><label
+            >Dépôt Git<input
+              name="repository"
+              required
+              placeholder="C:\projets\mon-app" /></label
+          ><label
+            >Ticket<textarea
+              name="ticket"
+              required
+              rows="6"
+              placeholder="Décrivez le problème, le résultat attendu et le contexte utile."
+            ></textarea></label
+          ><label
+            >Critères d’acceptation<textarea
+              name="criteria"
+              rows="3"
+              placeholder="Un critère par ligne"
+            ></textarea></label
+          ><label
+            >Passages maximum<input
+              name="iterations"
+              type="number"
+              min="1"
+              max="20"
+              value="5" /></label
+          ><button class="primary">Créer et lancer →</button>
+        </form>
+      </dialog>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "codexbridge",
+  "version": "1.0.0",
+  "description": "Persistent coding jobs, autonomous review and human decisions through CodexBridge.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "CodexBridge",
+    "shortDescription": "Send tickets and track autonomous coding jobs.",
+    "longDescription": "Create isolated Codex jobs, follow automatic review, inspect diffs and reports, and respond to product decisions.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Envoie ce ticket à CodexBridge et indique son identifiant."
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -1,0 +1,4 @@
+# Root-owned 0640 root:codexbridge. Fill required values locally, never commit secrets.
+# CONTROL_PLANE_API_KEY=
+# OPENAI_API_KEY=  (only if reviewer=openai)
+# Optional CODEXBRIDGE_TOKEN override; otherwise /var/lib/codexbridge/config.json.

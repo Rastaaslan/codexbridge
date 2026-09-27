@@ -1,0 +1,18 @@
+#!/bin/sh
+# Installed root:root 0755. No caller-supplied unit names, flags, paths or shell.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+[ "$#" -eq 1 ] || exit 64
+case "$1" in
+  start|stop|restart) exec /usr/bin/systemctl --no-block "$1" codexbridge.service codexbridge-tunnel.service ;;
+  status) exec /usr/bin/systemctl --no-pager --full status codexbridge.service codexbridge-tunnel.service ;;
+  is-active) exec /usr/bin/systemctl is-active codexbridge.service codexbridge-tunnel.service ;;
+  logs) exec /usr/bin/journalctl --no-pager -n 100 -u codexbridge.service -u codexbridge-tunnel.service -u codexbridge-update.service ;;
+  update)
+    state=$(/usr/bin/systemctl show --property=ActiveState --value codexbridge-update.service)
+    [ "$state" = inactive ] || [ "$state" = failed ] || exit 75
+    exec /usr/bin/systemctl --no-block start codexbridge-update.service ;;
+
+  *) exit 64 ;;
+esac
