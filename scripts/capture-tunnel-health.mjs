@@ -42,6 +42,40 @@ export function safeReport(value, secret) {
     : serialized;
 }
 
+// Buffer each stream until close so a key split across chunks is still masked.
+// On overflow omit the entire stream: truncating raw text could expose a key
+// prefix that no longer matches the complete secret during redaction.
+export function captureRuntimeOutput(child, report, limit = 65536) {
+  const collect = (stream) => {
+    let chunks = [],
+      bytes = 0,
+      truncated = false;
+    stream.on("data", (chunk) => {
+      if (truncated) return;
+      const data = Buffer.from(chunk);
+      bytes += data.length;
+      if (bytes > limit) {
+        chunks = [];
+        truncated = true;
+      } else chunks.push(data);
+    });
+    return () => ({
+      text: truncated
+        ? "[output omitted: size limit exceeded]"
+        : Buffer.concat(chunks).toString("utf8"),
+      truncated,
+    });
+  };
+  const stdout = collect(child.stdout);
+  const stderr = collect(child.stderr);
+  return new Promise((resolve) =>
+    child.once("close", () => {
+      report({ runtimeOutput: { stdout: stdout(), stderr: stderr() } });
+      resolve();
+    }),
+  );
+}
+
 async function main() {
   if (process.platform !== "linux")
     throw Error("Run this diagnostic on Debian only");
@@ -70,12 +104,13 @@ async function main() {
   spec.args[spec.args.indexOf("--pid.file") + 1] = files.pid;
   const report = (value) =>
     console.log(safeReport(value, process.env.CONTROL_PLANE_API_KEY));
-  // Suppress upstream logs: only the health capture is intended for sharing.
+  // Never inherit raw logs; report bounded, redacted output after stream close.
   const child = spawn(bin, spec.args, {
     env: spec.env,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
+  const outputClosed = captureRuntimeOutput(child, report);
   let done = false;
   child.once("error", () => {
     done = true;
@@ -122,6 +157,7 @@ async function main() {
     signalGroup("SIGTERM");
     await delay(1000);
     signalGroup("SIGKILL");
+    await outputClosed;
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
   }
