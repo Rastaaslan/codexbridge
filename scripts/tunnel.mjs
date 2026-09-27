@@ -2,14 +2,12 @@ import "dotenv/config";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { resolveTunnelBinary, tunnelMcpCommand } from "./tunnel-paths.mjs";
 const dir = path.resolve(process.env.CODEXBRIDGE_HOME || ".codexbridge");
 const installed = JSON.parse(
   readFileSync(path.join(dir, "tunnel-install.json"), "utf8"),
 );
-const bin = path.join(
-  installed.root,
-  process.platform === "win32" ? "tunnel-client.exe" : "tunnel-client",
-);
+const bin = resolveTunnelBinary(installed);
 const [action = "status", id] = process.argv.slice(2),
   file = path.join(dir, "tunnel.json");
 const profileDir = path.join(dir, "tunnel-profiles");
@@ -20,7 +18,7 @@ if (action === "setup") {
   writeFileSync(file, JSON.stringify({ tunnelId: id }, null, 2));
 }
 const settings = JSON.parse(readFileSync(file, "utf8"));
-const command = `"${process.execPath.replaceAll("\\", "/")}" "${path.resolve("dist/cli.js").replaceAll("\\", "/")}" mcp-stdio`;
+const command = tunnelMcpCommand();
 let args;
 if (action === "setup")
   args = [
