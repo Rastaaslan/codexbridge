@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { downloadLinuxAsset } from "../scripts/tunnel-asset.mjs";
+import { extractTunnelArchive } from "../scripts/tunnel-archive.mjs";
 
 // Offline fixture for the official v0.0.15 naming contract supplied in CB-42.
-const name = "tunnel-client-runtime-cloudflared-v0.0.15-linux-amd64.tar.gz";
+const name = "tunnel-client-runtime-cloudflared-v0.0.15-linux-amd64.zip";
 const data = Buffer.from("fixture archive bytes");
 const hash = createHash("sha256").update(data).digest("hex");
 const asset = (name: string) => ({
@@ -104,12 +105,104 @@ test("installer verifies Linux before writing or extracting and retains Windows 
       source.indexOf("await mkdir(root"),
   );
   assert.ok(
-    source.indexOf("await mkdir(root") < source.indexOf('execFileSync("tar"'),
+    source.indexOf("await mkdir(root") <
+      source.indexOf("const files = extractTunnelArchive("),
   );
   assert.match(source, /platform === "windows" \? "zip" : "tar.gz"/);
   assert.match(source, /asset\?\.digest\?\.startsWith\("sha256:"\)/);
   assert.match(
     source,
     /createHash\("sha256"\)\.update\(data\)\.digest\("hex"\) !==\s+asset.digest/,
+  );
+});
+
+test("Linux official ZIP uses unzip for listing, integrity check and extraction, never tar", () => {
+  const calls: unknown[] = [];
+  const archive = `/tmp/${name}`;
+  const files = extractTunnelArchive(
+    archive,
+    "/tmp/install",
+    "linux",
+    (command: string, args: string[]) => {
+      assert.equal(command, "unzip");
+      calls.push(args);
+      return "tunnel-client\ncloudflared\n";
+    },
+  );
+  assert.deepEqual(files, ["tunnel-client", "cloudflared"]);
+  assert.deepEqual(calls, [
+    ["-Z1", archive],
+    ["-tq", archive],
+    ["-oq", archive, "-d", "/tmp/install"],
+  ]);
+});
+
+test("Windows ZIP and Linux tar archives preserve tar extraction", () => {
+  for (const [archive, platform] of [
+    ["client.zip", "windows"],
+    ["client.tar.gz", "linux"],
+  ]) {
+    const calls: unknown[] = [];
+    extractTunnelArchive(
+      archive,
+      "destination",
+      platform,
+      (command: string, args: string[]) => {
+        assert.equal(command, "tar");
+        calls.push(args);
+        return "tunnel-client\n";
+      },
+    );
+    assert.deepEqual(calls, [
+      ["-tf", archive],
+      ["-xf", archive, "-C", "destination"],
+    ]);
+  }
+});
+
+test("ZIP rejects unsafe paths and tool failures without extraction or fallback", () => {
+  for (const listing of [
+    "",
+    "../escape\n",
+    "/absolute\n",
+    "C:\\escape\n",
+    "dir/../../escape\n",
+    "dir\\..\\escape\n",
+  ]) {
+    let calls = 0;
+    assert.throws(
+      () =>
+        extractTunnelArchive(name, "destination", "linux", () => {
+          calls++;
+          return listing;
+        }),
+      /Unsafe archive path/,
+    );
+    assert.equal(calls, 1);
+  }
+  for (const failedStep of [1, 2, 3]) {
+    let calls = 0;
+    assert.throws(
+      () =>
+        extractTunnelArchive(
+          name,
+          "destination",
+          "linux",
+          (command: string) => {
+            assert.equal(command, "unzip");
+            if (++calls === failedStep) throw Error("tool failed");
+            return "tunnel-client\n";
+          },
+        ),
+      /tool failed/,
+    );
+    assert.equal(calls, failedStep);
+  }
+  assert.throws(
+    () =>
+      extractTunnelArchive(name, "destination", "linux", () => {
+        throw Object.assign(Error("missing"), { code: "ENOENT" });
+      }),
+    /requires unzip/,
   );
 });

@@ -1,8 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { downloadLinuxAsset } from "./tunnel-asset.mjs";
+import { extractTunnelArchive } from "./tunnel-archive.mjs";
 const response = await fetch(
   "https://api.github.com/repos/openai/tunnel-client/releases/latest",
   { headers: { "User-Agent": "codexbridge" } },
@@ -42,19 +42,7 @@ const root = path.resolve(
 await mkdir(root, { recursive: true });
 const archive = path.join(root, name);
 await writeFile(archive, data);
-const files = execFileSync("tar", ["-tf", archive], {
-  encoding: "utf8",
-  windowsHide: true,
-})
-  .trim()
-  .split(/\r?\n/);
-if (
-  files.some(
-    (file) => path.isAbsolute(file) || file.split(/[\\/]/).includes(".."),
-  )
-)
-  throw Error("Unsafe archive path");
-execFileSync("tar", ["-xf", archive, "-C", root], { windowsHide: true });
+const files = extractTunnelArchive(archive, root, platform);
 await writeFile(
   path.resolve(
     process.env.CODEXBRIDGE_HOME || ".codexbridge",
