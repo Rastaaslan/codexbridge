@@ -160,10 +160,13 @@ export function toolDefinitions(core: Orchestrator) {
     {
       name: "server_doctor",
       description:
-        "Server checks, release, maintenance and persisted update outcome. Failed checks need attention.",
+        "Application health and tunnel availability, release, maintenance and persisted update outcome. Degraded tunnel does not imply an unhealthy application.",
       input: z.strictObject({}),
       output: z.strictObject({
         ok: z.boolean(),
+        orchestratorOk: z.boolean(),
+        availability: z.enum(["ready", "degraded", "unhealthy"]),
+        tunnel: z.enum(["ready", "degraded", "not_checked"]),
         checks: z.array(
           z.strictObject({
             name: z.string(),

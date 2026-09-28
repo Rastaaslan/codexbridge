@@ -79,6 +79,28 @@ export function overview(core: Orchestrator) {
     attention,
   };
 }
+export function healthSummary(checks: { name: string; ok: boolean }[]) {
+  const orchestratorOk = checks
+    .filter((c) => c.name !== "tunnel")
+    .every((c) => c.ok);
+  const tunnelCheck = checks.find((c) => c.name === "tunnel");
+  const tunnel = !tunnelCheck
+    ? "not_checked"
+    : tunnelCheck.ok
+      ? "ready"
+      : "degraded";
+  return {
+    ok: checks.every((c) => c.ok),
+    orchestratorOk,
+    availability: !orchestratorOk
+      ? "unhealthy"
+      : tunnel === "degraded"
+        ? "degraded"
+        : "ready",
+    tunnel,
+  };
+}
+
 export async function doctor(core: Orchestrator) {
   const checks: { name: string; ok: boolean; detail: string }[] = [];
   const check = async (name: string, fn: () => unknown | Promise<unknown>) => {
@@ -129,7 +151,11 @@ export async function doctor(core: Orchestrator) {
         { timeout: 10000 },
       );
       const state = JSON.parse(stdout);
-      if (!state.process_running || !state.healthy || !state.ready)
+      if (
+        state.process_running !== true ||
+        state.healthy !== true ||
+        state.ready !== true
+      )
         throw Error("Tunnel not ready");
     });
   let release: string | null = null;
@@ -152,7 +178,7 @@ export async function doctor(core: Orchestrator) {
     );
   } catch {}
   return {
-    ok: checks.every((c) => c.ok),
+    ...healthSummary(checks),
     checks,
     release,
     maintenance: core.restarting || maintenance(core.config.dataDir),

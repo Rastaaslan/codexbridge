@@ -56,6 +56,45 @@ export function safeError(error) {
     .replace(/https:\/\/[^/\s@]+@/g, "https://[REDACTED]@")
     .slice(0, 600);
 }
+
+// Accept the legacy doctor's check list for rollback/first upgrade as well as
+// the new explicit summary. Only the external tunnel is non-blocking.
+export function releaseHealth(status, expected) {
+  const required = [
+    "node",
+    "database",
+    "git",
+    "codexAuth",
+    "repositories",
+    "tunnel",
+  ];
+  const checks = status?.checks;
+  if (
+    typeof expected !== "string" ||
+    !expected.length ||
+    status?.managed !== true ||
+    status.release !== expected ||
+    !Array.isArray(checks) ||
+    checks.some(
+      (c) => !c || typeof c.name !== "string" || typeof c.ok !== "boolean",
+    ) ||
+    new Set(checks.map((c) => c.name)).size !== checks.length ||
+    required.some((name) => !checks.some((c) => c.name === name)) ||
+    checks.some((c) => c.name !== "tunnel" && c.ok !== true) ||
+    status.ok !== checks.every((c) => c.ok) ||
+    ("orchestratorOk" in status && status.orchestratorOk !== true)
+  )
+    throw Error("Doctor or release identity mismatch");
+  const tunnel = checks.find((c) => c.name === "tunnel").ok
+    ? "ready"
+    : "degraded";
+  if (
+    ("availability" in status && status.availability !== tunnel) ||
+    ("tunnel" in status && status.tunnel !== tunnel)
+  )
+    throw Error("Inconsistent doctor availability");
+  return { orchestratorOk: true, availability: tunnel, tunnel };
+}
 // Dependency-injected transaction: tests exercise the same ordering and failure paths.
 export async function transaction(driver, ref) {
   validateRef(ref);
@@ -82,8 +121,8 @@ export async function transaction(driver, ref) {
     activating = true;
     await driver.activate(candidate);
     await driver.restart();
-    await driver.health(candidate);
-    await save("completed");
+    const health = await driver.health(candidate);
+    await save("completed", { health });
     await driver.resume();
     return { phase: "completed", candidate };
   } catch (error) {
@@ -91,8 +130,9 @@ export async function transaction(driver, ref) {
       try {
         await driver.activate(previous);
         await driver.restart();
-        await driver.health(previous);
+        const health = await driver.health(previous);
         await save("rolled_back", {
+          health,
           reason: "Previous release restored: " + safeError(error),
         });
         await driver.resume();
@@ -120,10 +160,11 @@ export async function verifyRecovery(driver, state) {
     return;
   await driver.hold();
   try {
-    await driver.health(state.previous);
+    const health = await driver.health(state.previous);
     await driver.save({
       ...state,
       phase: "rolled_back",
+      health,
       reason: "Restored release passed post-start health checks.",
     });
     await driver.resume();
@@ -168,7 +209,13 @@ export async function recover(driver, state, boot = false) {
   }
   await driver.resume();
 }
-export async function makeDriver(root, dataDir, config, execute = exec) {
+export async function makeDriver(
+  root,
+  dataDir,
+  config,
+  execute = exec,
+  request = fetch,
+) {
   const releases = path.join(root, "releases");
   const maintenance = path.join(dataDir, "maintenance.json");
   const current = path.join(root, "current");
@@ -191,7 +238,7 @@ export async function makeDriver(root, dataDir, config, execute = exec) {
     const c = JSON.parse(
       await readFile(path.join(dataDir, "config.json"), "utf8"),
     );
-    const r = await fetch(
+    const r = await request(
       `http://127.0.0.1:${c.port ?? 3847}/api/tools/${name}`,
       {
         method: "POST",
@@ -315,21 +362,15 @@ export async function makeDriver(root, dataDir, config, execute = exec) {
       do {
         try {
           const status = await api("server_doctor");
-          if (!status.ok || status.release !== expected)
-            throw Error("Doctor or release identity mismatch");
+          const health = releaseHealth(status, expected);
           await run(
             "/usr/bin/systemctl",
-            [
-              "is-active",
-              "--quiet",
-              "codexbridge.service",
-              "codexbridge-tunnel.service",
-            ],
+            ["is-active", "--quiet", "codexbridge.service"],
             root,
             process.env,
             5000,
           );
-          return;
+          return health;
         } catch {
           await new Promise((resolve) => setTimeout(resolve, 1000));
         }
