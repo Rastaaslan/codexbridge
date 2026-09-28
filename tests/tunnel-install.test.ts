@@ -6,7 +6,7 @@ import { downloadLinuxAsset } from "../scripts/tunnel-asset.mjs";
 import { extractTunnelArchive } from "../scripts/tunnel-archive.mjs";
 
 // Offline fixture for the official v0.0.15 naming contract supplied in CB-42.
-const name = "tunnel-client-runtime-cloudflared-v0.0.15-linux-amd64.zip";
+const name = "tunnel-client-runtime-v0.0.15-linux-amd64.zip";
 const data = Buffer.from("fixture archive bytes");
 const hash = createHash("sha256").update(data).digest("hex");
 const asset = (name: string) => ({
@@ -18,6 +18,7 @@ const release = {
   assets: [
     asset(name),
     asset(name.replace("amd64", "arm64")),
+    asset("tunnel-client-runtime-cloudflared-v0.0.15-linux-amd64.zip"),
     asset("tunnel-client-v0.0.15-linux-amd64.tar.gz"),
     asset("SHA256SUMS.txt"),
     asset("PUBLIC_URLS.txt"),
@@ -126,10 +127,10 @@ test("Linux official ZIP uses unzip for listing, integrity check and extraction,
     (command: string, args: string[]) => {
       assert.equal(command, "unzip");
       calls.push(args);
-      return "tunnel-client\ncloudflared\n";
+      return "tunnel-client-runtime\n";
     },
   );
-  assert.deepEqual(files, ["tunnel-client", "cloudflared"]);
+  assert.deepEqual(files, ["tunnel-client-runtime"]);
   assert.deepEqual(calls, [
     ["-Z1", archive],
     ["-tq", archive],
