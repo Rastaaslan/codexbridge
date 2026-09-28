@@ -237,6 +237,15 @@ export class AppServerAdapter implements CodexAdapter {
               encoding: "utf8",
             }).trim(),
           );
+      const worktreeGitDir = o.readOnly
+        ? null
+        : path.resolve(
+            o.cwd,
+            execFileSync("git", ["rev-parse", "--git-dir"], {
+              cwd: o.cwd,
+              encoding: "utf8",
+            }).trim(),
+          );
       const params = {
         cwd: o.cwd,
         approvalPolicy: "never",
@@ -261,7 +270,7 @@ export class AppServerAdapter implements CodexAdapter {
           ? { type: "readOnly", networkAccess: false }
           : {
               type: "workspaceWrite",
-              writableRoots: [o.cwd, commonGitDir!, npmCache],
+              writableRoots: [o.cwd, commonGitDir!, worktreeGitDir!, npmCache],
               networkAccess: true,
               excludeTmpdirEnvVar: true,
               excludeSlashTmp: true,
