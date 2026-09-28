@@ -15,6 +15,7 @@ import {
   rm,
 } from "node:fs/promises";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 const exec = promisify(execFile);
 export function validateRef(ref) {
@@ -307,7 +308,7 @@ export async function makeDriver(
       await mkdir(scratch);
       // tsx creates an IPC Unix socket below TMPDIR. Release paths can exceed
       // the AF_UNIX path limit, so keep only temporary IPC files in short /tmp.
-      const ipcTmp = await mkdtemp("/tmp/codexbridge-validation-");
+      const ipcTmp = await mkdtemp(path.join(tmpdir(), "codexbridge-validation-"));
       const env = {
         PATH: process.env.PATH,
         HOME: scratch,

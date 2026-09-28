@@ -57,23 +57,28 @@ test("capture enters main through a current directory symlink, but stays inert w
   assert.equal(imported.stderr, "");
 });
 
-test("diagnostic preserves URL-file bytes, HTTP status and body without interpreting readiness", async () => {
-  for (const status of [200, 503]) {
-    const raw = "http://127.0.0.1:43210/custom-health\n";
-    const result = await captureHealth(
-      "fixture",
-      async () => raw,
-      async (url: string, options: any) => {
-        assert.equal(url, raw.trim());
-        assert.equal(options.redirect, "error");
-        return new Response("unknown upstream body\n", { status });
-      },
-    );
-    assert.equal(result.urlFile, raw);
-    assert.equal(result.httpStatus, status);
-    assert.equal(result.body, "unknown upstream body\n");
-    assert.equal("ready" in result, false);
-  }
+test("diagnostic preserves URL-file bytes and probes official health routes", async () => {
+  const raw = "http://127.0.0.1:43210\n";
+  const calls: string[] = [];
+  const result = await captureHealth(
+    "fixture",
+    async () => raw,
+    async (url: string, options: any) => {
+      calls.push(url);
+      assert.equal(options.redirect, "error");
+      const status = url.includes("/readyz") ? 503 : 200;
+      return new Response(url.includes("/health?") ? '{"ready":false}' : "probe\n", { status });
+    },
+  );
+  assert.equal(result.urlFile, raw);
+  assert.deepEqual(calls, [
+    "http://127.0.0.1:43210/healthz",
+    "http://127.0.0.1:43210/readyz",
+    "http://127.0.0.1:43210/health?details=true",
+  ]);
+  assert.equal(result.probes.healthz.httpStatus, 200);
+  assert.equal(result.probes.readyz.httpStatus, 503);
+  assert.equal(result.probes.details.body, '{"ready":false}');
 });
 
 test("runtime exit 1 before health file preserves stderr and redacts secrets split across writes", async () => {

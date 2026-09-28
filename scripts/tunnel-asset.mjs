@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 // Select only a published runtime archive, never an inferred download URL.
 export async function downloadLinuxAsset(release, arch, fetchAsset = fetch) {
-  const prefix = `tunnel-client-runtime-cloudflared-${release.tag_name}-linux-${arch}`;
+  const prefix = `tunnel-client-runtime-${release.tag_name}-linux-${arch}`;
   const candidates = release.assets.filter(
     (asset) =>
       asset.name.startsWith(prefix) &&
