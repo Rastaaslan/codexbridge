@@ -9,25 +9,36 @@ import { resolveTunnelBinary, tunnelMcpCommand } from "./tunnel-paths.mjs";
 
 export async function captureHealth(file, read = readFile, request = fetch) {
   const raw = await read(file, "utf8");
-  const capture = { urlFile: raw };
-  // Preserve the actual file even if it is NOT a plain URL. Do not guess a
-  // JSON field, endpoint suffix or readiness schema in this diagnostic.
+  const capture = { urlFile: raw, probes: {} };
   try {
-    const url = new URL(raw.trim());
+    const base = new URL(raw.trim());
     if (
-      url.protocol !== "http:" ||
-      url.hostname !== "127.0.0.1" ||
-      url.username ||
-      url.password
+      base.protocol !== "http:" ||
+      base.hostname !== "127.0.0.1" ||
+      base.username ||
+      base.password
     )
       throw Error("not a plain loopback HTTP URL");
-    const response = await request(url.href, {
-      redirect: "error",
-      signal: AbortSignal.timeout(3000),
-    });
-    capture.httpStatus = response.status;
-    capture.contentType = response.headers.get("content-type");
-    capture.body = await response.text();
+    for (const [name, pathname, search] of [
+      ["healthz", "/healthz", ""],
+      ["readyz", "/readyz", ""],
+      ["details", "/health", "?details=true"],
+    ]) {
+      const url = new URL(base.href);
+      url.pathname = pathname;
+      url.search = search;
+      url.hash = "";
+      const response = await request(url.href, {
+        redirect: "error",
+        signal: AbortSignal.timeout(3000),
+      });
+      capture.probes[name] = {
+        url: url.href,
+        httpStatus: response.status,
+        contentType: response.headers.get("content-type"),
+        body: await response.text(),
+      };
+    }
   } catch {
     capture.captureError =
       "URL format unrecognized or loopback HTTP request failed; inspect urlFile";
@@ -144,8 +155,8 @@ async function main() {
       await delay(1000);
     }
   } finally {
-    // Signal only the new process group created by this diagnostic, including
-    // its bundled cloudflared. Never use a PID read from disk for cleanup.
+    // Signal only the new process group created by this diagnostic. Never use
+    // a PID read from disk for cleanup.
     const signalGroup = (signal) => {
       if (!child.pid) return;
       try {
