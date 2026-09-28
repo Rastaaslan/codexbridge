@@ -12,7 +12,7 @@ export function resolveTunnelBinary(installed, platform = process.platform) {
   const names =
     platform === "win32"
       ? ["tunnel-client.exe", "tunnel-client-runtime-cloudflared.exe"]
-      : ["tunnel-client", "tunnel-client-runtime-cloudflared"];
+      : ["tunnel-client", "tunnel-client-runtime", "tunnel-client-runtime-cloudflared"];
   const candidates = [];
   for (const file of installed.files) {
     if (
