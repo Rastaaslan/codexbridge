@@ -6,20 +6,27 @@ import {
   tunnelMcpCommand,
 } from "../scripts/tunnel-paths.mjs";
 
-test("Debian v0.0.15 resolves the extracted runtime binary instead of nonexistent tunnel-client", () => {
+test("Debian resolves the narrow runtime and keeps the installed cloudflared flavor compatible", () => {
   const root = "/var/lib/codexbridge/bin/tunnel-client-v0.0.15";
   const binary = resolveTunnelBinary(
-    { root, files: ["tunnel-client-runtime-cloudflared", "README.md"] },
+    { root, files: ["tunnel-client-runtime", "README.md"] },
     "linux",
   );
-  assert.equal(binary, `${root}/tunnel-client-runtime-cloudflared`);
+  assert.equal(binary, `${root}/tunnel-client-runtime`);
   assert.notEqual(binary, `${root}/tunnel-client`);
   assert.equal(
     resolveTunnelBinary(
-      { root, files: ["bin/", "bin/tunnel-client-runtime-cloudflared"] },
+      { root, files: ["bin/", "bin/tunnel-client-runtime"] },
       "linux",
     ),
-    `${root}/bin/tunnel-client-runtime-cloudflared`,
+    `${root}/bin/tunnel-client-runtime`,
+  );
+  assert.equal(
+    resolveTunnelBinary(
+      { root, files: ["tunnel-client-runtime-cloudflared"] },
+      "linux",
+    ),
+    `${root}/tunnel-client-runtime-cloudflared`,
   );
 });
 
