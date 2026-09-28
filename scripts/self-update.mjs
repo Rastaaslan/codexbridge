@@ -11,6 +11,8 @@ import {
   unlink,
   open,
   realpath,
+  mkdtemp,
+  rm,
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -303,28 +305,35 @@ export async function makeDriver(
       // Build/test subprocesses receive no production secrets or runtime path.
       const scratch = path.join(candidate, ".validation");
       await mkdir(scratch);
+      // tsx creates an IPC Unix socket below TMPDIR. Release paths can exceed
+      // the AF_UNIX path limit, so keep only temporary IPC files in short /tmp.
+      const ipcTmp = await mkdtemp("/tmp/codexbridge-validation-");
       const env = {
         PATH: process.env.PATH,
         HOME: scratch,
-        TMPDIR: scratch,
-        TEMP: scratch,
-        TMP: scratch,
+        TMPDIR: ipcTmp,
+        TEMP: ipcTmp,
+        TMP: ipcTmp,
         CODEXBRIDGE_HOME: path.join(scratch, "runtime"),
         CI: "1",
       };
-      await run(
-        "npm",
-        ["ci", "--ignore-scripts", "--no-audit", "--no-fund"],
-        candidate,
-        env,
-      );
-      await run("npm", ["run", "build"], candidate, env);
-      await run("npm", ["test"], candidate, env);
-      await atomicJson(path.join(candidate, "release.json"), {
-        commit,
-        runtimeSchema: 1,
-      });
-      return candidate;
+      try {
+        await run(
+          "npm",
+          ["ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+          candidate,
+          env,
+        );
+        await run("npm", ["run", "build"], candidate, env);
+        await run("npm", ["test"], candidate, env);
+        await atomicJson(path.join(candidate, "release.json"), {
+          commit,
+          runtimeSchema: 1,
+        });
+        return candidate;
+      } finally {
+        await rm(ipcTmp, { recursive: true, force: true });
+      }
     },
     hold: () => atomicJson(maintenance, { reason: "recovery awaiting health" }),
     async quiesce() {
