@@ -24,7 +24,6 @@ export function linuxRunSpec(dir, tunnelId, command, env = process.env) {
       files.health,
       "--pid.file",
       files.pid,
-      "--cloudflared.managed",
     ],
     env: {
       ...env,
@@ -100,18 +99,29 @@ export async function linuxStatus(dir, bin, io = system, signal) {
       url.password
     )
       throw Error("Unsafe tunnel health URL");
-    status.health_url = url.href;
-    const response = await io.fetch(url.href, {
+    const probe = (pathname) => {
+      const target = new URL(url.href);
+      target.pathname = pathname;
+      target.search = "";
+      target.hash = "";
+      return target.href;
+    };
+    const healthUrl = probe("/healthz");
+    const readyUrl = probe("/readyz");
+    status.health_url = healthUrl;
+    const requestOptions = () => ({
       signal: signal
         ? AbortSignal.any([signal, AbortSignal.timeout(3000)])
         : AbortSignal.timeout(3000),
       redirect: "error",
     });
-    status.healthy = response.ok;
-    // Readiness must be explicitly reported; a listening HTTP server alone is
-    // not proof of a working tunnel.
-    const health = await response.json().catch(() => null);
-    status.ready = response.ok && health?.ready === true;
+    const health = await io.fetch(healthUrl, requestOptions());
+    status.healthy = health.ok;
+    if (!status.healthy) return status;
+    // Official tunnel-client readiness is carried by /readyz: HTTP 200 means
+    // ready and HTTP 503 means the runtime is alive but still gated.
+    const ready = await io.fetch(readyUrl, requestOptions());
+    status.ready = ready.ok;
   } catch {
     /* Missing/unavailable health endpoint is not healthy or ready. */
   }
