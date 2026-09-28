@@ -22,7 +22,7 @@ function mockRuntime({
   pid = "424242",
   executable = bin,
   args = [bin, "run", "--pid.file", runtimeFiles(dir).pid],
-  url = "http://127.0.0.1:12345/health",
+  url = "http://127.0.0.1:12345",
   alive = true,
   ready = true,
   ok = true,
@@ -46,9 +46,15 @@ function mockRuntime({
     kill: (pid: number, signal: unknown) => signals.push([pid, signal]),
     fetch: async (url: string, options: unknown) => {
       requests.push([url, options]);
-      return new Response(JSON.stringify({ ready }), {
-        status: ok ? 200 : 503,
-      });
+      if (url.endsWith("/healthz"))
+        return new Response(ok ? "live" : "unhealthy", {
+          status: ok ? 200 : 503,
+        });
+      if (url.endsWith("/readyz"))
+        return new Response(ready ? "ready" : "not ready", {
+          status: ok && ready ? 200 : 503,
+        });
+      throw Error("unexpected health route");
     },
   };
 }
@@ -79,8 +85,8 @@ test('Linux run contract avoids unknown command "runtimes" and keeps secrets out
     `${dir}/tunnel-health.url`,
     "--pid.file",
     `${dir}/tunnel-runtime.pid`,
-    "--cloudflared.managed",
   ]);
+  assert.ok(!spec.args.includes("--cloudflared.managed"));
   assert.equal(spec.env.CONTROL_PLANE_TUNNEL_ID, "tunnel_example");
   assert.equal(spec.env.MCP_COMMAND, command);
   assert.ok(!spec.args.join(" ").includes("fixture-key"));
@@ -97,6 +103,13 @@ test("Linux status combines owned PID with loopback health, without CLI calls", 
   assert.equal(status.process_running, true);
   assert.equal(status.healthy, true);
   assert.equal(status.ready, true);
+  assert.deepEqual(
+    io.requests.map(([url]) => url),
+    [
+      "http://127.0.0.1:12345/healthz",
+      "http://127.0.0.1:12345/readyz",
+    ],
+  );
   for (const options of [
     { alive: false },
     { ok: false },
