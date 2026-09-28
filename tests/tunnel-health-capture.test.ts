@@ -1,11 +1,61 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, symlink } from "node:fs/promises";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   captureHealth,
   safeReport,
   captureRuntimeOutput,
 } from "../scripts/capture-tunnel-health.mjs";
+
+test("capture enters main through a current directory symlink, but stays inert when imported", async () => {
+  const temporaryRoot = path.resolve(".test-tmp");
+  await mkdir(temporaryRoot, { recursive: true });
+  const root = await mkdtemp(path.join(temporaryRoot, "capture-entry-"));
+  const current = path.join(root, "current");
+  await symlink(
+    process.cwd(),
+    current,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const entry = path.join(current, "scripts", "capture-tunnel-health.mjs");
+  // Force the unsupported-platform check before any /var/lib reads or runtime
+  // launch, even on Linux CI. Reaching this error proves main was invoked.
+  const preload =
+    "data:text/javascript," +
+    encodeURIComponent(
+      "Object.defineProperty(process, 'platform', { value: 'win32' });",
+    );
+  for (const script of [
+    path.resolve("scripts/capture-tunnel-health.mjs"),
+    entry,
+  ]) {
+    const result = spawnSync(process.execPath, ["--import", preload, script], {
+      encoding: "utf8",
+      timeout: 10000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1, `main must run for ${script}`);
+    assert.match(result.stderr, /Capture failed:/);
+  }
+  const imported = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      "await import(process.argv[2]);",
+      "import-check",
+      pathToFileURL(entry).href,
+    ],
+    { encoding: "utf8", timeout: 10000 },
+  );
+  assert.ifError(imported.error);
+  assert.equal(imported.status, 0);
+  assert.equal(imported.stdout, "");
+  assert.equal(imported.stderr, "");
+});
 
 test("diagnostic preserves URL-file bytes, HTTP status and body without interpreting readiness", async () => {
   for (const status of [200, 503]) {
@@ -71,6 +121,31 @@ test("oversized runtime output is drained and fully omitted rather than leaking 
   assert.equal(child.exitCode, 0);
   assert.equal(output.stderr.truncated, true);
   assert.equal(output.stderr.text, "[output omitted: size limit exceeded]");
+});
+
+test("capture preserves the reported managed-runtime failure without treating it as ready", async () => {
+  // Exact messages supplied by the Debian operator, not a health API fixture.
+  const message =
+    "cloudflared: fetch managed runtime credentials failed\nHTTP 404: Managed Cloudflare tunnel runtime material not found\n";
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      "process.stderr.write(process.env.CAPTURE_FAILURE); process.exitCode=1;",
+    ],
+    {
+      env: { ...process.env, CAPTURE_FAILURE: message },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let report: any;
+  await captureRuntimeOutput(child, (value: unknown) => {
+    report = JSON.parse(safeReport(value, "fixture-key"));
+  });
+  assert.equal(child.exitCode, 1);
+  assert.equal(report.runtimeOutput.stderr.text, message);
+  assert.equal(report.runtimeOutput.stderr.truncated, false);
+  assert.equal("ready" in report, false);
 });
 
 test("diagnostic preserves unknown file formats without fetching and redacts API key", async () => {

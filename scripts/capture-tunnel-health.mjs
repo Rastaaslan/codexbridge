@@ -1,5 +1,5 @@
 // Manual Debian diagnostic only. Never imported by the production supervisor.
-import { readFile, mkdtemp } from "node:fs/promises";
+import { readFile, mkdtemp, realpath } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -163,9 +163,14 @@ async function main() {
   }
 }
 
+// Node resolves the module URL through symlinks, while argv retains "current".
+// Canonicalize both paths; a missing import-check argument must remain inert.
+const entryPath = process.argv[1]
+  ? await realpath(process.argv[1]).catch(() => null)
+  : null;
 if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  entryPath &&
+  entryPath === (await realpath(fileURLToPath(import.meta.url)))
 ) {
   main().catch(() => {
     console.error(

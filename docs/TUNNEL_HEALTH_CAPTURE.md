@@ -5,7 +5,7 @@ Outil de diagnostic local, sans modification du comportement de production. À e
 Depuis Debian, lancer cette commande unique (Node 24 lit la clé depuis le fichier local ; aucune clé dans la ligne de commande) :
 
 ```sh
-sudo -u codexbridge /usr/bin/env HOME=/var/lib/codexbridge CODEXBRIDGE_HOME=/var/lib/codexbridge CODEXBRIDGE_MANAGED=1 /usr/bin/node --env-file=/etc/codexbridge/environment /opt/codexbridge/current/scripts/capture-tunnel-health.mjs
+(cd / && sudo -u codexbridge /usr/bin/env HOME=/var/lib/codexbridge CODEXBRIDGE_HOME=/var/lib/codexbridge CODEXBRIDGE_MANAGED=1 /usr/bin/node --env-file=/etc/codexbridge/environment /opt/codexbridge/current/scripts/capture-tunnel-health.mjs)
 ```
 
 Le script lit l'installation v0.0.15 et l'ID existants, puis lance le binaire réel `run` avec les variables et flags déjà établis. Le fichier `--health.url-file` et le PID de diagnostic sont placés dans un répertoire unique `/var/lib/codexbridge/health-capture-*`, sans écraser les fichiers du service. La cible MCP reste `/opt/codexbridge/current/dist/cli.js`.
