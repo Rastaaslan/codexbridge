@@ -45,11 +45,48 @@ export const refSchema = z
       !/[\s\u0000-\u001f\u007f:]/u.test(ref),
     "Invalid Git ref",
   );
+export const projectInputSchema = z.strictObject({
+  name: z.string().trim().min(1).max(200),
+});
+export const projectSchema = projectInputSchema.extend({
+  id: z.string(),
+  createdAt: z.string(),
+});
+export const featureInputSchema = projectInputSchema.extend({
+  projectId: z.string().regex(/^PR-\d+$/),
+});
+export const featureSchema = featureInputSchema.extend({
+  id: z.string(),
+  createdAt: z.string(),
+});
+export const dependencyIdsSchema = z
+  .array(z.string().regex(/^CB-\d+$/))
+  .max(100);
+export const dependencyStateSchema = z.enum([
+  "SATISFIED",
+  "WAITING",
+  "BLOCKED",
+]);
+export const schedulingStateSchema = z.enum([
+  "READY",
+  "WAITING",
+  "BLOCKED",
+  "INACTIVE",
+]);
 export const createSchema = z.strictObject({
   title: z.string().trim().min(1).max(200),
   ticket: z.string().trim().min(1).max(100000),
   repository: z.string().min(1),
   startRef: refSchema.optional(),
+  projectId: z
+    .string()
+    .regex(/^PR-\d+$/)
+    .optional(),
+  featureId: z
+    .string()
+    .regex(/^FT-\d+$/)
+    .optional(),
+  dependencies: dependencyIdsSchema.optional(),
   acceptanceCriteria: z.array(z.string().min(1).max(5000)).max(100).default([]),
   options: z
     .strictObject({
@@ -75,6 +112,13 @@ export interface Job extends CreateInput {
   metadata: Record<string, unknown>;
   feedback: string | null;
   childPid: number | null;
+  dependencyState?: z.infer<typeof dependencyStateSchema>;
+  schedulingState?: z.infer<typeof schedulingStateSchema>;
+  dependencyStatuses?: {
+    id: string;
+    status: Status;
+    state: z.infer<typeof dependencyStateSchema>;
+  }[];
 }
 export const jobSchema = createSchema.extend({
   id: z.string(),
@@ -92,6 +136,15 @@ export const jobSchema = createSchema.extend({
   metadata: z.record(z.string(), z.unknown()),
   feedback: z.string().nullable(),
   childPid: z.number().nullable(),
+  dependencyState: dependencyStateSchema,
+  schedulingState: schedulingStateSchema,
+  dependencyStatuses: z.array(
+    z.strictObject({
+      id: z.string(),
+      status: z.enum(statuses),
+      state: dependencyStateSchema,
+    }),
+  ),
 });
 const transitions: Record<Status, Status[]> = {
   CREATED: ["QUEUED", "CANCELLED"],

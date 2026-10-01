@@ -1,6 +1,16 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createSchema, jobSchema, errorMessage } from "./domain.js";
+import {
+  projectInputSchema,
+  projectSchema,
+  featureInputSchema,
+  featureSchema,
+  dependencyIdsSchema,
+  schedulingStateSchema,
+  createSchema,
+  jobSchema,
+  errorMessage,
+} from "./domain.js";
 import type { Orchestrator } from "./orchestrator.js";
 import {
   doctor,
@@ -37,6 +47,55 @@ export function toolDefinitions(core: Orchestrator) {
     run: (a: any) => Promise<any>;
   }[] = [
     {
+      name: "create_project",
+      description: "Create a persistent project grouping features and jobs.",
+      input: projectInputSchema,
+      output: z.strictObject({ project: projectSchema }),
+      readOnly: false,
+      run: async (a) => ({ project: core.store.createProject(a) }),
+    },
+    {
+      name: "list_projects",
+      description: "List persistent projects.",
+      input: z.strictObject({}),
+      output: z.strictObject({ projects: z.array(projectSchema) }),
+      readOnly: true,
+      run: async () => ({ projects: core.store.projects() }),
+    },
+    {
+      name: "create_feature",
+      description: "Create a persistent feature within a project.",
+      input: featureInputSchema,
+      output: z.strictObject({ feature: featureSchema }),
+      readOnly: false,
+      run: async (a) => ({ feature: core.store.createFeature(a) }),
+    },
+    {
+      name: "list_features",
+      description: "List features, optionally within a project.",
+      input: z.strictObject({ projectId: z.string().optional() }),
+      output: z.strictObject({ features: z.array(featureSchema) }),
+      readOnly: true,
+      run: async (a) => ({
+        features: core.store
+          .features()
+          .filter((f) => !a.projectId || f.projectId === a.projectId),
+      }),
+    },
+    {
+      name: "set_job_dependencies",
+      description:
+        "Replace dependencies before a queued job starts. Rejects cycles, self-dependencies and unknown jobs. Only COMPLETED dependencies release a job.",
+      input: idSchema.extend({ dependencies: dependencyIdsSchema }),
+      output: z.strictObject({ job: jobSchema }),
+      readOnly: false,
+      run: async (a) => {
+        const job = core.store.setDependencies(a.id, a.dependencies);
+        void core.tick();
+        return { job };
+      },
+    },
+    {
       name: "create_job",
       description:
         "Create and queue an isolated Codex coding job. The service continues autonomously through review. Supply an absolute allowed repository path and a stable idempotencyKey to avoid duplicate submissions.",
@@ -60,6 +119,9 @@ export function toolDefinitions(core: Orchestrator) {
         "List jobs, newest first, with optional status filtering and pagination.",
       input: z.strictObject({
         status: z.string().optional(),
+        projectId: z.string().optional(),
+        featureId: z.string().optional(),
+        schedulingState: schedulingStateSchema.optional(),
         offset: z.number().int().min(0).default(0),
         limit: z.number().int().min(1).max(100).default(50),
       }),
@@ -68,7 +130,13 @@ export function toolDefinitions(core: Orchestrator) {
       run: async (a: any) => {
         const jobs = core.store
           .list()
-          .filter((j) => !a.status || j.status === a.status);
+          .filter(
+            (j) =>
+              (!a.status || j.status === a.status) &&
+              (!a.projectId || j.projectId === a.projectId) &&
+              (!a.featureId || j.featureId === a.featureId) &&
+              (!a.schedulingState || j.schedulingState === a.schedulingState),
+          );
         return {
           jobs: jobs.slice(a.offset, a.offset + a.limit),
           total: jobs.length,

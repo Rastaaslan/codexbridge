@@ -91,7 +91,7 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
         }),
       );
       const tools = await client.listTools();
-      assert.equal(tools.tools.length, 16);
+      assert.equal(tools.tools.length, 21);
       assert.ok(tools.tools.every((t) => t.outputSchema));
       const result = await client.callTool({
         name: "list_jobs",
@@ -123,7 +123,7 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
       }),
     );
     try {
-      assert.equal((await proxy.listTools()).tools.length, 16);
+      assert.equal((await proxy.listTools()).tools.length, 21);
       assert.deepEqual(
         (await proxy.callTool({ name: "list_jobs", arguments: {} }))
           .structuredContent,
@@ -148,6 +148,67 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
     );
     assert.equal(existsSync(path.join(config.dataDir, "server.lock")), false);
     assert.equal(store.list().length, 0);
+    const call = async (name: string, body: unknown) => {
+      const response = await fetch(url + "/api/tools/" + name, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + config.token,
+        },
+        body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+    const { project } = await call("create_project", { name: "P1" });
+    const { feature } = await call("create_feature", {
+      name: "DAG",
+      projectId: project.id,
+    });
+    assert.deepEqual((await call("list_projects", {})).projects, [project]);
+    assert.deepEqual(
+      (await call("list_features", { projectId: project.id })).features,
+      [feature],
+    );
+    const { createSchema } = await import("../src/domain.js");
+    const parent = store.create(
+      createSchema.parse({ title: "Parent", ticket: "Test", repository: dir }),
+    );
+    const child = store.create(
+      createSchema.parse({
+        title: "Child",
+        ticket: "Test",
+        repository: dir,
+        featureId: feature.id,
+        dependencies: [parent.id],
+      }),
+    );
+    const listing = await call("list_jobs", {
+      projectId: project.id,
+      schedulingState: "WAITING",
+    });
+    assert.equal(listing.total, 1);
+    assert.equal(listing.jobs[0].id, child.id);
+    assert.equal(listing.jobs[0].dependencyStatuses[0].status, "QUEUED");
+    const client = new Client({ name: "hierarchy-test", version: "1" });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(url + "/mcp"), {
+        requestInit: { headers: { Authorization: "Bearer " + config.token } },
+      }),
+    );
+    try {
+      const result = await client.callTool({
+        name: "get_job",
+        arguments: { id: child.id },
+      });
+      assert.equal((result.structuredContent as any).job.featureId, feature.id);
+      assert.equal(
+        (result.structuredContent as any).job.schedulingState,
+        "WAITING",
+      );
+    } finally {
+      await client.close();
+    }
   } finally {
     server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));

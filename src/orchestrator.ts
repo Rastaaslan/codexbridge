@@ -126,7 +126,7 @@ export class Orchestrator {
           this.store.unlock(job.id);
       for (const job of this.store.list().reverse()) {
         if (this.running.size >= this.config.maxConcurrentJobs) break;
-        if (job.status !== "QUEUED") continue;
+        if (job.schedulingState !== "READY") continue;
         if (alive(job.childPid)) continue;
         try {
           this.store.lock(job.repository, job.id);
@@ -270,7 +270,9 @@ export class Orchestrator {
       if (job.status !== "READY_FOR_HUMAN_TEST")
         throw new Error("Only a job ready for human testing can be completed.");
       this.store.decision(id, action, instruction);
-      return this.store.transition(id, "COMPLETED");
+      const completed = this.store.transition(id, "COMPLETED");
+      void this.tick();
+      return completed;
     }
     if (!["retry", "send_instruction", "reject"].includes(action))
       throw new Error("Unknown action");

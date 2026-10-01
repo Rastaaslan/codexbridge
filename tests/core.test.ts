@@ -380,7 +380,7 @@ test("every MCP tool declares strict input and structured output", async () => {
   const f = await fixture();
   try {
     const definitions = toolDefinitions(f.core);
-    assert.equal(definitions.length, 16);
+    assert.equal(definitions.length, 21);
     for (const t of definitions)
       assert.equal(t.input.safeParse({ unexpected: true }).success, false);
     const create = definitions.find((t) => t.name === "create_job")!;
@@ -632,3 +632,216 @@ for (const phase of ["activating", "rollback_failed"]) {
     });
   }
 }
+
+test("P1 hierarchy, DAG validation, blocked states, idempotency and v1 migration persist", async () => {
+  const f = await fixture();
+  await f.core.stop();
+  try {
+    const legacy = f.store.create(createSchema.parse(ticket(f.repo)));
+    const legacyJson = { ...legacy };
+    delete legacyJson.dependencies;
+    delete legacyJson.dependencyState;
+    delete legacyJson.dependencyStatuses;
+    delete legacyJson.schedulingState;
+    delete legacyJson.projectId;
+    delete legacyJson.featureId;
+    f.store.db
+      .prepare("UPDATE jobs SET data=? WHERE id=?")
+      .run(JSON.stringify(legacyJson), legacy.id);
+    // Reconstruct the v1 schema while preserving old JSON and CB sequence.
+    f.store.db.exec(
+      "DROP TABLE job_dependencies; DROP TABLE job_hierarchy; DROP TABLE features; DROP TABLE projects; PRAGMA user_version=1;",
+    );
+    f.store.close();
+    const store = new Store(path.join(f.config.dataDir, "codexbridge.db"));
+    try {
+      assert.equal(store.get(legacy.id).schedulingState, "READY");
+      const project = store.createProject({ name: "Upgrade" });
+      const feature = store.createFeature({
+        name: "DAG",
+        projectId: project.id,
+      });
+      const input = createSchema.parse({
+        ...ticket(f.repo),
+        featureId: feature.id,
+        dependencies: [legacy.id],
+        options: { idempotencyKey: "dag" },
+      });
+      const dependent = store.create(input);
+      assert.equal(dependent.id, "CB-2");
+      assert.equal(dependent.projectId, project.id);
+      assert.equal(dependent.schedulingState, "WAITING");
+      assert.equal(store.create(input).id, dependent.id);
+      assert.throws(
+        () => store.create({ ...input, dependencies: [] }),
+        /different input/,
+      );
+      assert.throws(
+        () => store.setDependencies(legacy.id, [dependent.id]),
+        /cycle/,
+      );
+      assert.throws(
+        () => store.setDependencies(legacy.id, [legacy.id]),
+        /Self/,
+      );
+      assert.throws(
+        () => store.setDependencies(legacy.id, ["CB-999"]),
+        /Unknown/,
+      );
+      assert.throws(
+        () =>
+          store.create(
+            createSchema.parse({ ...ticket(f.repo), dependencies: ["CB-3"] }),
+          ),
+        /Self/,
+      );
+      assert.equal(store.list().length, 2);
+      assert.throws(
+        () => store.create({ ...input, projectId: "PR-999" }),
+        /belong/,
+      );
+      assert.throws(
+        () => store.createFeature({ name: "Bad", projectId: "PR-999" }),
+        /not found/,
+      );
+      store.transition(legacy.id, "FAILED");
+      assert.equal(store.get(dependent.id).schedulingState, "BLOCKED");
+      store.transition(legacy.id, "QUEUED");
+      assert.equal(store.get(dependent.id).schedulingState, "WAITING");
+      store.transition(legacy.id, "CANCELLED");
+      assert.equal(
+        store.get(dependent.id).dependencyStatuses![0].state,
+        "BLOCKED",
+      );
+      const reopened = new Store(path.join(f.config.dataDir, "codexbridge.db"));
+      try {
+        assert.deepEqual(reopened.projects(), [project]);
+        assert.deepEqual(reopened.features(), [feature]);
+        assert.deepEqual(reopened.get(dependent.id), store.get(dependent.id));
+        assert.equal(reopened.events(legacy.id)[0].type, "JOB_CREATED");
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      store.close();
+    }
+  } finally {
+    await f.core.stop();
+  }
+});
+
+test("P1 automatic DAG dispatch waits for human completion and preserves concurrent isolated work", async () => {
+  const releases = new Map<string, () => void>();
+  let active = 0,
+    peak = 0;
+  const f = await fixture({
+    async run(o) {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => {
+        releases.set(o.cwd, resolve);
+        o.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      active--;
+      return { ...successful };
+    },
+  });
+  f.config.maxConcurrentJobs = 2;
+  const waitFor = async (predicate: () => boolean) => {
+    for (let i = 0; i < 500; i++) {
+      if (predicate()) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.fail("Timed out waiting for automatic dispatch");
+  };
+  try {
+    const a = f.store.create(createSchema.parse(ticket(f.repo)));
+    const b = f.store.create(
+      createSchema.parse({ ...ticket(f.repo), dependencies: [a.id] }),
+    );
+    const c = f.store.create(createSchema.parse(ticket(f.repo)));
+    const d = f.store.create(createSchema.parse(ticket(f.repo)));
+    f.core.start();
+    await waitFor(() => active === 2);
+    assert.equal(f.store.get(b.id).status, "QUEUED");
+    assert.equal(f.store.get(d.id).status, "QUEUED");
+    assert.notEqual(f.store.get(a.id).worktree, f.store.get(c.id).worktree);
+    releases.get(f.store.get(a.id).worktree!)!();
+    await waitFor(
+      () =>
+        f.store.get(a.id).status === "READY_FOR_HUMAN_TEST" &&
+        f.store.get(d.id).status === "CODEX_RUNNING",
+    );
+    assert.equal(f.store.get(b.id).schedulingState, "WAITING");
+    await f.core.action(a.id, "approve");
+    assert.equal(f.store.get(b.id).schedulingState, "READY");
+    releases.get(f.store.get(c.id).worktree!)!();
+    await waitFor(() => f.store.get(b.id).status === "CODEX_RUNNING");
+    assert.throws(() => f.store.setDependencies(b.id, []), /before/);
+    assert.equal(peak, 2);
+    for (const release of releases.values()) release();
+    await waitFor(() =>
+      [b, c, d].every(
+        (j) => f.store.get(j.id).status === "READY_FOR_HUMAN_TEST",
+      ),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("P1 restart recovery derives fan-in readiness from persisted dependency lifecycle", async () => {
+  const f = await fixture();
+  await f.core.stop();
+  const project = f.store.createProject({ name: "Recovery" });
+  const feature = f.store.createFeature({
+    name: "Fan-in",
+    projectId: project.id,
+  });
+  const input = createSchema.parse({
+    ...ticket(f.repo),
+    featureId: feature.id,
+  });
+  const a = f.store.create(input);
+  const b = f.store.create(input);
+  const child = f.store.create({ ...input, dependencies: [a.id, b.id] });
+  const leaf = f.store.create({ ...input, dependencies: [child.id] });
+  f.store.transition(a.id, "PREPARING");
+  f.store.patch(b.id, { status: "COMPLETED" });
+  f.store.close();
+  const store = new Store(path.join(f.config.dataDir, "codexbridge.db"));
+  const core = new Orchestrator(
+    f.config,
+    store,
+    new GitWorkspace(f.config),
+    {
+      async run() {
+        return { ...successful };
+      },
+    },
+    {
+      async review() {
+        return { ...accept, issues: [], requestedChanges: [] };
+      },
+    },
+  );
+  try {
+    await core.recover();
+    assert.equal(store.get(a.id).status, "FAILED");
+    assert.equal(store.get(child.id).schedulingState, "BLOCKED");
+    assert.equal(store.get(leaf.id).schedulingState, "WAITING");
+    assert.equal(store.get(child.id).projectId, project.id);
+    assert.equal(store.get(child.id).featureId, feature.id);
+    await core.action(a.id, "retry");
+    await settle(core, a.id);
+    assert.equal(store.get(child.id).schedulingState, "WAITING");
+    await core.action(a.id, "approve");
+    assert.equal((await settle(core, child.id)).status, "READY_FOR_HUMAN_TEST");
+    assert.equal(store.get(leaf.id).schedulingState, "WAITING");
+    await core.action(child.id, "approve");
+    assert.equal((await settle(core, leaf.id)).status, "READY_FOR_HUMAN_TEST");
+  } finally {
+    await core.stop();
+    store.close();
+  }
+});

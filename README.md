@@ -80,3 +80,42 @@ Voir [architecture](ARCHITECTURE.md), [sécurité](SECURITY.md), [dépannage](TR
 ## Serveur sans ?cran
 
 Voir [la migration Debian](docs/MIGRATION.md). `create_job` accepte `startRef` (branche, tag, ref ou SHA local) et fige son commit. Les onze outils historiques restent disponibles ; `server_doctor`, `server_logs`, `jobs_overview`, `restart_service` et `self_update` compl?tent le pilotage vocal.
+
+### Projects, features and job dependencies (P1)
+
+Legacy `create_job` payloads still queue immediately. Optionally create a project
+with `create_project({name})`, then a feature with
+`create_feature({projectId, name})`. Pass `projectId`, `featureId`, and/or
+`dependencies: ["CB-1", "CB-2"]` to `create_job`. A feature implies its project;
+a conflicting explicit project is rejected. Jobs may also belong directly to a
+project, or remain ungrouped. Dependencies may cross features and projects.
+
+`list_projects` and `list_features({projectId?})` expose the persisted hierarchy.
+`get_job`, `list_jobs`, and `get_job_report` include dependency IDs, each
+dependency's lifecycle status and state, aggregate `dependencyState`, and
+derived `schedulingState`. `list_jobs` accepts `projectId`, `featureId`, and
+`schedulingState` filters in addition to the existing status/pagination fields.
+All these tools are available through MCP and authenticated
+`POST /api/tools/<tool_name>`.
+
+A queued job is `READY` when every dependency is `COMPLETED` (including an
+empty dependency list). It is `BLOCKED` if any direct dependency is failed or
+cancelled, otherwise `WAITING`. Non-queued jobs have scheduling state
+`INACTIVE`. READY is derived, not a replacement lifecycle status or a promise
+of an immediately available execution slot. Review acceptance alone does not
+satisfy dependencies: human testing and `approve_job` must complete first.
+The scheduler automatically dispatches READY jobs subject to concurrency and
+worktree preparation locks. Retrying a failed dependency can unblock its
+dependents without editing them.
+
+`set_job_dependencies({id, dependencies})` replaces edges only while a job is
+queued and has never begun work. Self-dependencies, unknown IDs, and cycles are
+rejected atomically. Dependency lists are treated as sets. Create-job
+idempotency compares hierarchy and dependencies as well as the existing fields.
+
+SQLite schema v2 adds hierarchy and dependency tables transactionally on opening
+a v1 database, preserving CB IDs, sequence, events, threads, reviews, and decisions.
+Readiness is recomputed from persisted lifecycle state after restart. Existing
+interrupted-worker recovery and the worker/reviewer/corrections/human-test loop
+are unchanged. Dependencies express scheduling order; they do not merge upstream
+worktrees or change a job's Git base. Integration remains an explicit manual action.
