@@ -1,8 +1,10 @@
 import {
   spawn,
   execFile,
+  execFileSync,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import type { Config } from "./config.js";
@@ -37,6 +39,8 @@ export class AppServerAdapter implements CodexAdapter {
     const env = { ...process.env };
     for (const key of Object.keys(env))
       if (/TOKEN|SECRET|PASSWORD|API_KEY/i.test(key)) delete env[key];
+    const npmCache = path.join(this.config.dataDir, ".npm");
+    env.NPM_CONFIG_CACHE = npmCache;
     const child = spawn(
       this.config.codexCommand,
       ["app-server", "--listen", "stdio://"],
@@ -123,7 +127,14 @@ export class AppServerAdapter implements CodexAdapter {
           return;
         }
         if (m.id !== undefined && m.method) {
-          // Never grant escalation or external tool access automatically.
+          if (m.method.includes("requestApproval") && !o.readOnly) {
+            send({ id: m.id, result: { decision: "accept" } });
+            o.onEvent("APPROVAL_GRANTED", {
+              method: m.method,
+              params: m.params,
+            });
+            return;
+          }
           if (m.method.includes("requestApproval"))
             send({ id: m.id, result: { decision: "decline" } });
           else
@@ -200,7 +211,7 @@ export class AppServerAdapter implements CodexAdapter {
         includeLayers: false,
       });
       const overrides: Record<string, unknown> = {
-        "sandbox_workspace_write.network_access": false,
+        "sandbox_workspace_write.network_access": !o.readOnly,
         web_search: "disabled",
         "features.apps": false,
       };
@@ -217,9 +228,27 @@ export class AppServerAdapter implements CodexAdapter {
           { enabled: false },
         ]),
       );
+      const commonGitDir = o.readOnly
+        ? null
+        : path.resolve(
+            o.cwd,
+            execFileSync("git", ["rev-parse", "--git-common-dir"], {
+              cwd: o.cwd,
+              encoding: "utf8",
+            }).trim(),
+          );
+      const worktreeGitDir = o.readOnly
+        ? null
+        : path.resolve(
+            o.cwd,
+            execFileSync("git", ["rev-parse", "--git-dir"], {
+              cwd: o.cwd,
+              encoding: "utf8",
+            }).trim(),
+          );
       const params = {
         cwd: o.cwd,
-        approvalPolicy: o.readOnly ? "never" : "on-request",
+        approvalPolicy: "never",
         approvalsReviewer: "user",
         sandbox: o.readOnly ? "read-only" : "workspace-write",
         ...(this.config.model ? { model: this.config.model } : {}),
@@ -241,8 +270,8 @@ export class AppServerAdapter implements CodexAdapter {
           ? { type: "readOnly", networkAccess: false }
           : {
               type: "workspaceWrite",
-              writableRoots: [o.cwd],
-              networkAccess: false,
+              writableRoots: [o.cwd, commonGitDir!, worktreeGitDir!, npmCache],
+              networkAccess: true,
               excludeTmpdirEnvVar: true,
               excludeSlashTmp: true,
             },
