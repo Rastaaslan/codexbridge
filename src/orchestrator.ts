@@ -9,7 +9,11 @@ import {
   resultSchema,
   type Job,
 } from "./domain.js";
-import { HumanRequired, type CodexAdapter } from "./codex.js";
+import {
+  HumanRequired,
+  TransientRuntimeError,
+  type CodexAdapter,
+} from "./codex.js";
 import type { Reviewer } from "./reviewer.js";
 import { logger } from "./log.js";
 
@@ -62,10 +66,13 @@ export class Orchestrator {
         } catch (e) {
           state = errorMessage(e);
         }
-        this.store.transition(job.id, "FAILED", {
-          blocker: `Interrupted service. ${state} ${alive(job.childPid) ? "Old Codex process still alive; retry is blocked until it exits." : "Retry resumes the saved thread and inspects existing changes before continuing."}`,
+        const message = `Interrupted service. ${state} ${alive(job.childPid) ? "Old Codex process still alive; retry is blocked until it exits." : "Retry resumes the saved thread and inspects existing changes before continuing."}`;
+        this.store.patch(job.id, {
           metadata: { ...job.metadata, recoveredFrom: job.status },
         });
+        if (job.status === "CODEX_RUNNING" && !job.result)
+          this.runtimeFailure(job.id, message);
+        else this.store.transition(job.id, "FAILED", { blocker: message });
         this.store.event(job.id, "RECOVERY", {
           previousStatus: job.status,
           threadId: job.codexThreadId,
@@ -121,8 +128,7 @@ export class Orchestrator {
       this.restarting ||
       maintenance(this.config.dataDir) ||
       this.stopping ||
-      this.ticking ||
-      this.running.size >= this.config.maxConcurrentJobs
+      this.ticking
     )
       return;
     this.ticking = true;
@@ -134,13 +140,93 @@ export class Orchestrator {
           !alive(job.childPid)
         )
           this.store.unlock(job.id);
-      for (const job of this.store.list().reverse()) {
-        if (this.running.size >= this.config.maxConcurrentJobs) break;
-        if (job.schedulingState !== "READY") continue;
-        if (alive(job.childPid)) continue;
-        try {
-          this.store.lock(job.repository, job.id);
-        } catch {
+      const now = Date.now();
+      for (const job of this.store.list()) {
+        if (
+          job.status === "FAILED" &&
+          job.retry.nextRetryAt &&
+          Date.parse(job.retry.nextRetryAt) <= now &&
+          !alive(job.childPid) &&
+          !this.running.has(job.id)
+        )
+          this.store.transition(job.id, "QUEUED", {
+            retry: { ...job.retry, nextRetryAt: null },
+          });
+      }
+      const score = (job: Job) =>
+        Math.min(
+          100,
+          job.priority +
+            Math.floor(
+              Math.max(
+                0,
+                now - Date.parse(job.readySince ?? new Date(now).toISOString()),
+              ) / this.config.schedulerAgingMs,
+            ),
+        );
+      const jobs = this.store
+        .list()
+        .sort(
+          (a, b) =>
+            score(b) - score(a) ||
+            Number(a.id.slice(3)) - Number(b.id.slice(3)),
+        );
+      let reserved = false;
+      for (let job of jobs) {
+        if (job.status !== "QUEUED") continue;
+        let reason: string | null = null;
+        if (job.schedulingState !== "READY") {
+          reason = `Dependencies ${job.dependencyState?.toLowerCase()}`;
+          if (job.readySince)
+            job = this.store.patch(job.id, { readySince: null });
+        } else {
+          if (!job.readySince)
+            job = this.store.patch(job.id, {
+              readySince: new Date(now).toISOString(),
+            });
+          const active = this.store
+            .list()
+            .filter(
+              (j) =>
+                activeStatuses.includes(j.status) ||
+                this.running.has(j.id) ||
+                alive(j.childPid),
+            );
+          const used = active.reduce((n, j) => n + j.executionCost, 0);
+          const limit =
+            this.config.repositoryConcurrencyLimits[job.repository] ??
+            this.config.maxConcurrentJobs;
+          if (job.pauseState.project) reason = "Project admission paused";
+          else if (job.pauseState.repository)
+            reason = "Repository admission paused";
+          else if (alive(job.childPid) || this.running.has(job.id))
+            reason = "Previous worker still active";
+          else if (job.executionCost > this.capacity)
+            reason = "Execution cost exceeds scheduler capacity";
+          else if (
+            active.filter((j) => j.repository === job.repository).length >=
+            limit
+          )
+            reason = "Repository concurrency limit reached";
+          else if (active.length >= this.config.maxConcurrentJobs)
+            reason = "Global concurrency limit reached";
+          else if (reserved) reason = "Capacity reserved for an aged READY job";
+          else if (used + job.executionCost > this.capacity) {
+            reason = "Insufficient weighted capacity";
+            // Drain capacity for aged expensive jobs instead of letting small arrivals starve them.
+            if (score(job) === 100) reserved = true;
+          }
+          if (!reason) {
+            try {
+              this.store.lock(job.repository, job.id);
+            } catch {
+              reason = "Repository preparation or integration lock held";
+            }
+          }
+        }
+        if (reason) {
+          if (job.admissionReason !== reason)
+            this.store.patch(job.id, { admissionReason: reason });
           continue;
         }
         const controller = new AbortController();
@@ -155,7 +241,71 @@ export class Orchestrator {
       this.ticking = false;
     }
   }
+  get capacity() {
+    return this.config.schedulerCapacity ?? this.config.maxConcurrentJobs;
+  }
+  scheduler() {
+    const active = this.store
+      .list()
+      .filter(
+        (j) =>
+          activeStatuses.includes(j.status) ||
+          this.running.has(j.id) ||
+          alive(j.childPid),
+      );
+    return {
+      maxConcurrentJobs: this.config.maxConcurrentJobs,
+      capacity: this.capacity,
+      usedCapacity: active.reduce((n, j) => n + j.executionCost, 0),
+      runningJobs: active.length,
+      repositoryLimits: this.config.repositoryConcurrencyLimits,
+      pauses: this.store.pauses(),
+    };
+  }
+  async setAdmission(input: {
+    scope: "project" | "repository";
+    target: string;
+    paused: boolean;
+  }) {
+    if (input.scope === "repository")
+      input = { ...input, target: await this.git.repository(input.target) };
+    const control = this.store.setPause(input);
+    await this.tick();
+    return control;
+  }
+  private runtimeFailure(id: string, message: string) {
+    const job = this.store.get(id);
+    const exhausted = job.retry.count >= this.config.maxRuntimeRetries;
+    const retry = {
+      count: job.retry.count + (exhausted ? 0 : 1),
+      nextRetryAt: exhausted
+        ? null
+        : new Date(
+            Date.now() +
+              Math.min(
+                this.config.retryMaxBackoffMs,
+                this.config.retryBackoffMs * 2 ** job.retry.count,
+              ),
+          ).toISOString(),
+      exhausted,
+      lastError: message,
+    };
+    this.store.transition(id, "FAILED", {
+      blocker: message,
+      retry,
+      // CODEX_RUNNING reserved this passage's iteration. A runtime failure did
+      // not reach review: refund it atomically with the persisted retry state,
+      // including when recovery detects an interrupted worker after restart.
+      iteration: Math.max(0, job.iteration - 1),
+    });
+    this.store.event(
+      id,
+      exhausted ? "RUNTIME_RETRY_EXHAUSTED" : "RUNTIME_RETRY_SCHEDULED",
+      retry,
+    );
+  }
   private async run(id: string, signal: AbortSignal) {
+    let workerRuntime = false;
     try {
       let job = this.store.transition(id, "PREPARING", { blocker: null });
       if (!job.worktree) {
@@ -174,6 +324,7 @@ export class Orchestrator {
         worktree: job.worktree,
       });
       job = this.store.transition(id, "CODEX_RUNNING", {
+        result: null,
         iteration: job.iteration + 1,
       });
       const prompt = `Job ${job.id}: ${job.title}\nOriginal ticket:\n${job.ticket}\nAcceptance criteria:\n${job.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}\n${job.feedback ? "Feedback / human decision:\n" + job.feedback : ""}\n${job.metadata.recoveredFrom ? "This is recovery after interruption. Inspect existing changes and tests; do not repeat completed external actions." : ""}\nImplement the ticket and run meaningful tests. Report test commands and actual outcomes accurately. Return the structured result. If compilation or tests fail, fix them before reporting. Never push, publish, deploy, or merge. If credentials or a genuine product decision are missing, return blocked with a precise question.`;
@@ -185,6 +336,7 @@ export class Orchestrator {
         onEvent: (type: string, data: unknown) =>
           this.store.event(id, type, data),
       };
+      workerRuntime = true;
       const result = resultSchema.parse(
         await this.adapter.run({
           cwd: job.worktree!,
@@ -195,6 +347,7 @@ export class Orchestrator {
           onThread: (thread) => this.store.thread(id, thread),
         }),
       );
+      workerRuntime = false;
       signal.throwIfAborted();
       job = this.store.patch(id, { result });
       if (result.requiresHumanDecision) {
@@ -262,6 +415,12 @@ export class Orchestrator {
         (job.status === "CODEX_RUNNING" || job.status === "REVIEWING")
       )
         this.store.transition(id, "WAITING_FOR_HUMAN", { blocker: message });
+      else if (
+        workerRuntime &&
+        e instanceof TransientRuntimeError &&
+        !signal.aborted
+      )
+        this.runtimeFailure(id, message);
       else if (activeStatuses.includes(job.status))
         this.store.transition(id, "FAILED", { blocker: message });
     }
@@ -271,7 +430,9 @@ export class Orchestrator {
     const job = this.store.get(id);
     if (action === "cancel") {
       if (job.status === "CANCELLED") return job;
-      this.store.transition(id, "CANCELLED");
+      this.store.transition(id, "CANCELLED", {
+        retry: { ...job.retry, nextRetryAt: null },
+      });
       const run = this.running.get(id);
       run?.controller.abort();
       if (run) await run.promise;
@@ -307,6 +468,7 @@ export class Orchestrator {
       throw new Error("Job cannot be resumed in this state.");
     this.store.decision(id, action, instruction);
     const next = this.store.transition(id, "QUEUED", {
+      retry: { count: 0, nextRetryAt: null, exhausted: false, lastError: null },
       feedback: instruction || job.feedback,
       blocker: null,
       maxIterations: Math.max(job.maxIterations, job.iteration + 5),

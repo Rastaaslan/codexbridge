@@ -23,6 +23,8 @@ export interface CodexAdapter {
   run(options: RunOptions): Promise<unknown>;
 }
 export class HumanRequired extends Error {}
+// Only transport/runtime failures are eligible; never classify arbitrary model text.
+export class TransientRuntimeError extends Error {}
 type Wire = {
   id?: number | string;
   method?: string;
@@ -91,7 +93,7 @@ export class AppServerAdapter implements CodexAdapter {
         const id = ++sequence;
         const timer = setTimeout(() => {
           pending.delete(id);
-          reject(new Error(`Codex RPC timeout: ${method}`));
+          reject(new TransientRuntimeError(`Codex RPC timeout: ${method}`));
         }, 30000);
         pending.set(id, { resolve, reject, timer });
         send({ id, method, params });
@@ -108,7 +110,7 @@ export class AppServerAdapter implements CodexAdapter {
     };
     o.signal.addEventListener("abort", abort, { once: true });
     const timeout = setTimeout(() => {
-      fail(new Error("Codex passage timeout"));
+      fail(new TransientRuntimeError("Codex passage timeout"));
       child.stdin.end();
     }, this.config.timeoutMs);
     const lines = createInterface({ input: child.stdout });
@@ -192,9 +194,20 @@ export class AppServerAdapter implements CodexAdapter {
     child.stderr.on("data", () => {
       /* Transport stderr can contain environment data; never persist raw stderr. */
     });
-    child.on("error", fail);
-    child.on("exit", (code) =>
-      fail(new Error(`Codex app-server exited (${code})`)),
+    const transportError = (e: NodeJS.ErrnoException) =>
+      fail(
+        ["EPIPE", "ECONNRESET", "ETIMEDOUT", "EAGAIN"].includes(e.code ?? "")
+          ? new TransientRuntimeError(`Worker transport failure: ${e.code}`)
+          : e,
+      );
+    child.on("error", transportError);
+    child.stdin.on("error", transportError);
+    child.on("exit", (code, signal) =>
+      fail(
+        signal === "SIGKILL" || signal === "SIGSEGV"
+          ? new TransientRuntimeError(`Codex app-server terminated (${signal})`)
+          : new Error(`Codex app-server exited (${code})`),
+      ),
     );
     try {
       await request("initialize", {

@@ -73,11 +73,34 @@ export const schedulingStateSchema = z.enum([
   "BLOCKED",
   "INACTIVE",
 ]);
+export const prioritySchema = z.number().int().min(0).max(100);
+export const executionCostSchema = z.number().int().min(1).max(1000);
+export const retryStateSchema = z.strictObject({
+  count: z.number().int().min(0),
+  nextRetryAt: z.string().nullable(),
+  exhausted: z.boolean(),
+  lastError: z.string().nullable(),
+});
+export const admissionControlSchema = z.strictObject({
+  scope: z.enum(["project", "repository"]),
+  target: z.string().min(1),
+  paused: z.boolean(),
+});
+export const schedulerSchema = z.strictObject({
+  maxConcurrentJobs: z.number(),
+  capacity: z.number(),
+  usedCapacity: z.number(),
+  runningJobs: z.number(),
+  repositoryLimits: z.record(z.string(), z.number()),
+  pauses: z.array(admissionControlSchema),
+});
 export const createSchema = z.strictObject({
   title: z.string().trim().min(1).max(200),
   ticket: z.string().trim().min(1).max(100000),
   repository: z.string().min(1),
   startRef: refSchema.optional(),
+  priority: prioritySchema.default(0),
+  executionCost: executionCostSchema.default(1),
   projectId: z
     .string()
     .regex(/^PR-\d+$/)
@@ -98,6 +121,10 @@ export const createSchema = z.strictObject({
 export type CreateInput = z.infer<typeof createSchema>;
 export interface Job extends CreateInput {
   id: string;
+  admissionReason: string | null;
+  readySince: string | null;
+  retry: z.infer<typeof retryStateSchema>;
+  pauseState: { project: boolean; repository: boolean };
   status: Status;
   codexThreadId: string | null;
   branch: string | null;
@@ -123,6 +150,10 @@ export interface Job extends CreateInput {
 export const jobSchema = createSchema.extend({
   id: z.string(),
   status: z.enum(statuses),
+  admissionReason: z.string().nullable(),
+  readySince: z.string().nullable(),
+  retry: retryStateSchema,
+  pauseState: z.strictObject({ project: z.boolean(), repository: z.boolean() }),
   codexThreadId: z.string().nullable(),
   branch: z.string().nullable(),
   worktree: z.string().nullable(),

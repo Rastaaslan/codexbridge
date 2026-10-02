@@ -91,8 +91,26 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
         }),
       );
       const tools = await client.listTools();
-      assert.equal(tools.tools.length, 23);
+      assert.equal(tools.tools.length, 25);
       assert.ok(tools.tools.every((t) => t.outputSchema));
+      const scheduler = await client.callTool({
+        name: "get_scheduler",
+        arguments: {},
+      });
+      assert.equal(
+        (scheduler.structuredContent as any).scheduler.capacity,
+        config.maxConcurrentJobs,
+      );
+      const badAdmission = await client.callTool({
+        name: "set_admission",
+        arguments: {
+          scope: "project",
+          target: "PR-999",
+          paused: true,
+          extra: true,
+        },
+      });
+      assert.equal(badAdmission.isError, true);
       const result = await client.callTool({
         name: "list_jobs",
         arguments: {},
@@ -105,6 +123,31 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
       assert.equal(bad.isError, true);
       await client.close();
     }
+    const schedulerResponse = await fetch(url + "/api/tools/get_scheduler", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + config.token,
+      },
+      body: "{}",
+    });
+    assert.equal(schedulerResponse.status, 200);
+    assert.equal((await schedulerResponse.json()).scheduler.runningJobs, 0);
+    const pausedProject = store.createProject({ name: "Pause via API" });
+    const pauseResponse = await fetch(url + "/api/tools/set_admission", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + config.token,
+      },
+      body: JSON.stringify({
+        scope: "project",
+        target: pausedProject.id,
+        paused: true,
+      }),
+    });
+    assert.equal(pauseResponse.status, 200);
+    assert.equal(store.paused("project", pausedProject.id), true);
     await writeFile(
       path.join(config.dataDir, "config.json"),
       JSON.stringify(config),
@@ -123,7 +166,7 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
       }),
     );
     try {
-      assert.equal((await proxy.listTools()).tools.length, 23);
+      assert.equal((await proxy.listTools()).tools.length, 25);
       assert.deepEqual(
         (await proxy.callTool({ name: "list_jobs", arguments: {} }))
           .structuredContent,
@@ -165,7 +208,10 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
       name: "DAG",
       projectId: project.id,
     });
-    assert.deepEqual((await call("list_projects", {})).projects, [project]);
+    assert.deepEqual((await call("list_projects", {})).projects, [
+      pausedProject,
+      project,
+    ]);
     assert.deepEqual(
       (await call("list_features", { projectId: project.id })).features,
       [feature],

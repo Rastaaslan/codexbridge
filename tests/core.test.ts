@@ -380,7 +380,7 @@ test("every MCP tool declares strict input and structured output", async () => {
   const f = await fixture();
   try {
     const definitions = toolDefinitions(f.core);
-    assert.equal(definitions.length, 23);
+    assert.equal(definitions.length, 25);
     for (const t of definitions)
       assert.equal(t.input.safeParse({ unexpected: true }).success, false);
     const create = definitions.find((t) => t.name === "create_job")!;

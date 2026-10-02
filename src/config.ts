@@ -16,6 +16,14 @@ export const configSchema = z.strictObject({
   port: z.number().int().min(1).max(65535).default(3847),
   repositoryRoots: z.array(z.string()).default([]),
   maxConcurrentJobs: z.number().int().min(1).max(10).default(10),
+  schedulerCapacity: z.number().int().min(1).max(10000).optional(),
+  repositoryConcurrencyLimits: z
+    .record(z.string(), z.number().int().min(1).max(10))
+    .default({}),
+  schedulerAgingMs: z.number().int().min(1).default(60000),
+  maxRuntimeRetries: z.number().int().min(0).max(10).default(3),
+  retryBackoffMs: z.number().int().min(1).max(3600000).default(5000),
+  retryMaxBackoffMs: z.number().int().min(1).max(86400000).default(300000),
   integrationCommands: z
     .array(
       z.strictObject({

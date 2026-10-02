@@ -2,6 +2,9 @@ import { integrationInputSchema, integrationSchema } from "./integration.js";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
+  schedulerSchema,
+  admissionControlSchema,
+  retryStateSchema,
   projectInputSchema,
   projectSchema,
   featureInputSchema,
@@ -47,6 +50,24 @@ export function toolDefinitions(core: Orchestrator) {
     readOnly: boolean;
     run: (a: any) => Promise<any>;
   }[] = [
+    {
+      name: "get_scheduler",
+      description:
+        "Read weighted capacity, hard concurrency ceiling, repository limits and persisted admission pauses.",
+      input: z.strictObject({}),
+      output: z.strictObject({ scheduler: schedulerSchema }),
+      readOnly: true,
+      run: async () => ({ scheduler: core.scheduler() }),
+    },
+    {
+      name: "set_admission",
+      description:
+        "Pause or resume project or repository admission. Running jobs continue; repository must be allowed.",
+      input: admissionControlSchema,
+      output: z.strictObject({ control: admissionControlSchema }),
+      readOnly: false,
+      run: async (a) => ({ control: await core.setAdmission(a) }),
+    },
     {
       name: "integrate_job",
       description:
@@ -276,6 +297,20 @@ export function toolDefinitions(core: Orchestrator) {
         "Compact project/job counts and the ten newest items needing human attention.",
       input: z.strictObject({}),
       output: z.strictObject({
+        scheduler: schedulerSchema,
+        queue: z.array(
+          z.strictObject({
+            id: z.string(),
+            priority: z.number(),
+            executionCost: z.number(),
+            admissionReason: z.string().nullable(),
+            pauseState: z.strictObject({
+              project: z.boolean(),
+              repository: z.boolean(),
+            }),
+            retry: retryStateSchema,
+          }),
+        ),
         counts: z.record(z.string(), z.number()),
         projects: z.array(
           z.strictObject({

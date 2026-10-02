@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { EventEmitter } from "node:events";
 import {
   assertTransition,
+  admissionControlSchema,
   projectInputSchema,
   projectSchema,
   featureInputSchema,
@@ -148,6 +149,10 @@ export class Store extends EventEmitter {
       if (job.status !== "QUEUED" || job.worktree || job.iteration !== 0)
         throw Error("Dependencies can only change before a queued job starts");
       this.writeDependencies(id, dependencies);
+      this.patch(id, {
+        readySince: null,
+        admissionReason: "Awaiting scheduler evaluation",
+      });
       this.event(id, "DEPENDENCIES_UPDATED", { dependencies });
       return this.get(id);
     });
@@ -180,6 +185,29 @@ export class Store extends EventEmitter {
         : "SATISFIED";
     return {
       ...raw,
+      priority: raw.priority ?? 0,
+      executionCost: raw.executionCost ?? 1,
+      readySince:
+        raw.readySince === undefined
+          ? raw.status === "QUEUED"
+            ? raw.createdAt
+            : null
+          : raw.readySince,
+      admissionReason:
+        raw.admissionReason ??
+        (raw.status === "QUEUED" ? "Awaiting scheduler evaluation" : null),
+      retry: raw.retry ?? {
+        count: 0,
+        nextRetryAt: null,
+        exhausted: false,
+        lastError: null,
+      },
+      pauseState: {
+        project: hierarchy
+          ? this.paused("project", String(hierarchy.project_id))
+          : false,
+        repository: this.paused("repository", raw.repository),
+      },
       projectId: hierarchy ? String(hierarchy.project_id) : undefined,
       featureId: hierarchy?.feature_id
         ? String(hierarchy.feature_id)
@@ -220,6 +248,8 @@ export class Store extends EventEmitter {
             prior.repository !== input.repository ||
             prior.title !== input.title ||
             prior.startRef !== input.startRef ||
+            prior.priority !== input.priority ||
+            prior.executionCost !== input.executionCost ||
             prior.projectId !== input.projectId ||
             prior.featureId !== input.featureId ||
             JSON.stringify(prior.dependencies) !==
@@ -242,6 +272,15 @@ export class Store extends EventEmitter {
         ...input,
         id: `CB-${seq}`,
         status: "QUEUED",
+        readySince: now,
+        admissionReason: "Awaiting scheduler evaluation",
+        retry: {
+          count: 0,
+          nextRetryAt: null,
+          exhausted: false,
+          lastError: null,
+        },
+        pauseState: { project: false, repository: false },
         codexThreadId: null,
         branch: null,
         worktree: null,
@@ -264,6 +303,8 @@ export class Store extends EventEmitter {
           .prepare("INSERT INTO job_hierarchy VALUES(?,?,?)")
           .run(job.id, input.projectId, input.featureId ?? null);
       this.writeDependencies(job.id, input.dependencies ?? []);
+      if (this.get(job.id).schedulingState !== "READY")
+        this.patch(job.id, { readySince: null });
       this.event(job.id, "JOB_CREATED", { title: job.title });
       return this.get(job.id);
     });
@@ -293,7 +334,13 @@ export class Store extends EventEmitter {
   transition(id: string, status: Status, patch: Partial<Job> = {}) {
     return this.transaction(() => {
       assertTransition(this.get(id).status, status);
-      const j = this.patch(id, { ...patch, status });
+      const j = this.patch(id, {
+        admissionReason:
+          status === "QUEUED" ? "Awaiting scheduler evaluation" : null,
+        readySince: status === "QUEUED" ? new Date().toISOString() : null,
+        ...patch,
+        status,
+      });
       this.event(id, `JOB_${status}`, {
         blocker: j.blocker,
         iteration: j.iteration,
@@ -365,6 +412,37 @@ export class Store extends EventEmitter {
   }
   unlock(id: string) {
     this.db.prepare("DELETE FROM repository_locks WHERE job_id=?").run(id);
+  }
+  pauses() {
+    return this.db
+      .prepare(
+        "SELECT value FROM settings WHERE key LIKE 'admission:%' ORDER BY key",
+      )
+      .all()
+      .map((r) => admissionControlSchema.parse(JSON.parse(String(r.value))));
+  }
+  paused(scope: "project" | "repository", target: string) {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key=?")
+      .get(`admission:${scope}:${target}`);
+    return row
+      ? admissionControlSchema.parse(JSON.parse(String(row.value))).paused
+      : false;
+  }
+  setPause(input: unknown) {
+    const control = admissionControlSchema.parse(input);
+    if (
+      control.scope === "project" &&
+      !this.projects().some((p) => p.id === control.target)
+    )
+      throw Error("Unknown project");
+    this.db
+      .prepare("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)")
+      .run(
+        `admission:${control.scope}:${control.target}`,
+        JSON.stringify(control),
+      );
+    return control;
   }
   close() {
     this.db.close();

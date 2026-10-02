@@ -73,11 +73,17 @@ test("hard process kill retains SQLite WAL, worktree, thread and recovery diagno
   );
   try {
     assert.equal(store.get("CB-1").status, "CODEX_RUNNING");
+    assert.equal(store.get("CB-1").iteration, 1);
     await core.recover();
     const job = store.get("CB-1");
     assert.equal(job.status, "FAILED");
     assert.equal(job.codexThreadId, "persisted-before-kill");
-    assert.equal(job.iteration, 1);
+    assert.equal(job.iteration, 0); // Interrupted runtime did not reach review.
+    assert.equal(job.retry.count, 1);
+    assert.ok(job.retry.nextRetryAt);
+    await core.recover();
+    assert.equal(store.get(job.id).iteration, 0);
+    assert.deepEqual(store.get(job.id).retry, job.retry);
     assert.match(job.blocker!, /Worktree intact/);
     assert.ok(store.events(job.id).some((e) => e.type === "RECOVERY"));
     const worktrees = await git(repo, ["worktree", "list", "--porcelain"]);

@@ -46,7 +46,7 @@ Conserver les autres champs existants. Le reviewer par défaut utilise un thread
 
 ## Utilisation
 
-Créer un ticket dans le dashboard ou via `create_job` depuis le plugin connecté. Le job traverse worker → review → corrections jusqu’à acceptation, décision humaine ou budget épuisé. Le service traite un job à la fois ; les autres attendent dans la file persistante.
+Créer un ticket dans le dashboard ou via `create_job` depuis le plugin connecté. Le job traverse worker → review → corrections jusqu’à acceptation, décision humaine ou budget épuisé. Le service respecte les limites de concurrence configurées ; les autres jobs attendent dans la file persistante.
 
 ```text
 Utilisateur : Envoie un ticket pour corriger add(2,2), qui renvoie 5.
@@ -115,9 +115,8 @@ idempotency compares hierarchy and dependencies as well as the existing fields.
 
 SQLite schema v2 adds hierarchy and dependency tables transactionally on opening
 a v1 database, preserving CB IDs, sequence, events, threads, reviews, and decisions.
-Readiness is recomputed from persisted lifecycle state after restart. Existing
-interrupted-worker recovery and the worker/reviewer/corrections/human-test loop
-are unchanged. Dependencies express scheduling order; they do not merge upstream
+Readiness is recomputed from persisted lifecycle state after restart. The worker/reviewer/corrections/human-test loop is preserved; P3 adds bounded
+runtime retries as described below. Dependencies express scheduling order; they do not merge upstream
 worktrees or change a job's Git base. Integration remains an explicit manual action.
 
 ### Local reviewed integration (P2)
@@ -126,7 +125,11 @@ Reviewer acceptance never integrates a job. After a job reaches
 `READY_FOR_HUMAN_TEST` or `COMPLETED`, explicitly call `integrate_job` with:
 
 ```json
-{"id":"CB-12","target":"feature-chain","expectedBase":"<full source base commit>"}
+{
+  "id": "CB-12",
+  "target": "feature-chain",
+  "expectedBase": "<full source base commit>"
+}
 ```
 
 The MCP tool and authenticated `POST /api/tools/integrate_job` endpoint share
@@ -175,3 +178,52 @@ cannot replace a successful baseline. On restart, an interrupted publication is
 reconciled against its persisted candidate commit; other interrupted attempts
 are failed and require an explicit retry. Interrupted candidate directories may
 remain for diagnosis; retries use a fresh directory.
+
+### Scheduler and runtime resilience (P3)
+
+`create_job` accepts integer `priority` (0–100, default 0; higher first) and
+`executionCost` (1–1000, default 1). Both persist in job data and participate in
+idempotency checks. Old stored jobs receive the same safe defaults on read.
+Only dependency-READY jobs may start. Equal effective priorities use the numeric
+CB sequence for deterministic FIFO ordering.
+
+Administrator configuration adds:
+
+- `schedulerCapacity`: total execution cost admitted concurrently; defaults to
+  `maxConcurrentJobs`. The existing hard job ceiling always applies too.
+- `repositoryConcurrencyLimits`: map of canonical absolute repository paths to
+  concurrent-job limits (1–10). Unspecified repositories use the global ceiling.
+- `schedulerAgingMs`: milliseconds per priority aging point (default 60000).
+  Waiting READY jobs age up to priority 100, where FIFO wins over new arrivals.
+  An aged job waiting for weighted capacity reserves space by draining current
+  work, preventing a stream of small jobs from starving an expensive one.
+- `maxRuntimeRetries`: automatic retries per manual run (default 3; 0 disables).
+- `retryBackoffMs` and `retryMaxBackoffMs`: exponential backoff base and cap
+  (defaults 5000 and 300000 milliseconds).
+
+`set_admission({scope: "project" | "repository", target, paused})` persists an
+admission pause or resume. The target is a project ID or allowed repository path.
+Running jobs continue. Paused or repository-limited jobs do not prevent admission
+from unrelated repositories. A job whose cost exceeds total capacity remains
+queued with an explicit reason until the administrator increases capacity.
+
+`get_scheduler` exposes total/used capacity, the hard ceiling, running count,
+repository limits and persisted pauses. Job responses include `admissionReason`,
+`readySince`, `pauseState`, and `retry` (`count`, `nextRetryAt`, `exhausted`,
+`lastError`). Reasons are persisted on scheduler evaluation. `jobs_overview`
+includes scheduler state and at most 20 queued/retrying/exhausted jobs. These
+strict tools are also available at authenticated `POST /api/tools/<tool_name>`.
+
+Only explicitly classified worker transport/runtime failures (RPC or passage
+timeouts, temporary transport errors, selected process signals, or an interrupted
+worker recovered after restart) schedule automatic retries. Unknown errors,
+human/product blockers, structured failed tests, review rejections, cancellation,
+and integration failures never trigger runtime retries. The existing reviewed
+correction loop remains separate and retains its iteration budget. A transient
+worker failure refunds the reserved iteration atomically with retry state, so
+runtime retries (including restart recovery) do not consume correction attempts.
+Retry counters
+and deadlines persist; due retries re-enter the normal admission policy and reuse
+the saved worktree and Codex thread. A surviving old process blocks retry until it
+exits. Exhaustion leaves an inspectable FAILED job; explicit human retry resets
+the automatic retry budget. Cancellation clears any pending retry deadline.

@@ -71,6 +71,22 @@ export function overview(core: Orchestrator) {
       });
   }
   return {
+    scheduler: core.scheduler(),
+    queue: core.store
+      .list()
+      .filter(
+        (j) =>
+          j.status === "QUEUED" || j.retry.nextRetryAt || j.retry.exhausted,
+      )
+      .slice(0, 20)
+      .map((j) => ({
+        id: j.id,
+        priority: j.priority,
+        executionCost: j.executionCost,
+        admissionReason: j.admissionReason,
+        pauseState: j.pauseState,
+        retry: j.retry,
+      })),
     counts: groups,
     projects: [...projects].map(([repository, counts]) => ({
       repository,
