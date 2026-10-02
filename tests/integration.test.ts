@@ -1,3 +1,4 @@
+import { Planner } from "../src/planner.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
@@ -276,6 +277,16 @@ test("concurrent duplicates conflict and verification mutations are rejected", a
     const req = { id: f.job.id, target: "test", expectedBase: f.base };
     const running = f.core.integration.integrate(req);
     await assert.rejects(f.core.integration.integrate(req), /in progress/);
+    let restartCalls = 0;
+    const restart = toolDefinitions(f.core, {
+      control: async () => {
+        restartCalls++;
+      },
+    }).find((t) => t.name === "restart_service")!;
+    await assert.rejects(restart.run({}), /Service busy/);
+    assert.equal(restartCalls, 0);
+    assert.equal(f.core.restarting, false);
+
     await assert.rejects(
       f.core.action(f.job.id, "reject", "redo"),
       /Integration in progress/,
@@ -527,6 +538,146 @@ test("planner refuses an integrated predecessor's obsolete review after rejectio
     assert.equal(
       await git(f.repo, ["rev-parse", original.ref]),
       original.resultCommit,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("managed restart and failed candidate activation retain planner, admission, retry, integration and runtime artifacts", async () => {
+  const { makeDriver, transaction } =
+    await import("../scripts/self-update.mjs");
+  const { symlink, realpath, readFile } = await import("node:fs/promises");
+  const f = await fixture();
+  try {
+    const attempt = await f.core.integrate({
+      id: f.job.id,
+      target: "release-check",
+      expectedBase: f.base,
+    });
+    f.store.setPause({ scope: "repository", target: f.repo, paused: true });
+    const plan = (
+      await f.core.planner.create({
+        name: "Restart",
+        repository: f.repo,
+        startRef: "main",
+        features: [{ key: "later", title: "Later", ticket: "Preserve" }],
+      })
+    ).roadmap;
+    f.core.planner.validate(plan.id, 1);
+    f.core.planner.apply(plan.id, 1);
+    f.store.patch(f.job.id, {
+      retry: {
+        ...f.store.get(f.job.id).retry,
+        count: 1,
+        nextRetryAt: "2099-01-01T00:00:00.000Z",
+      },
+    });
+    let before = f.store.list();
+    let plannerBefore = f.core.planner.read(plan.id);
+    const pauses = f.store.pauses();
+    const worktree = await readFile(
+      path.join(f.job.worktree!, "value"),
+      "utf8",
+    );
+    const credentials = path.join(f.config.dataDir, "config.json");
+    await writeFile(credentials, '{"token":"preserve-credentials"}');
+    let restartCalls = 0;
+    const restart = toolDefinitions(f.core, {
+      control: async (action) => {
+        assert.equal(action, "restart");
+        restartCalls++;
+      },
+    }).find((t) => t.name === "restart_service")!;
+    assert.deepEqual(await restart.run({}), { accepted: true });
+    assert.equal(restartCalls, 1);
+    await f.core.stop();
+    const reopened = f.reopen();
+    const core = new Orchestrator(
+      f.config,
+      f.store,
+      f.workspace,
+      {
+        async run() {
+          throw Error("Duplicate work");
+        },
+      },
+      {
+        async review() {
+          throw Error("Duplicate review");
+        },
+      },
+    );
+    await core.recover();
+    await core.recover();
+    await core.tick();
+    const stableJobs = (jobs: typeof before) =>
+      jobs.map(({ updatedAt, readySince, admissionReason, ...job }) => job);
+    assert.deepEqual(stableJobs(f.store.list()), stableJobs(before));
+    assert.equal(
+      f.store.list()[0].admissionReason,
+      "Repository admission paused",
+    );
+    before = f.store.list();
+    assert.deepEqual(core.planner.read(plan.id).roadmap, plannerBefore.roadmap);
+    plannerBefore = core.planner.read(plan.id);
+    assert.deepEqual(f.store.pauses(), pauses);
+    assert.deepEqual(reopened.history(f.job.id), [attempt]);
+    await core.stop();
+    const root = path.join(f.dir, "installation");
+    const previous = path.join(root, "releases", "old");
+    const candidate = path.join(root, "releases", "candidate");
+    await mkdir(previous, { recursive: true });
+    await mkdir(candidate);
+    await symlink(previous, path.join(root, "current"));
+    const driver = await makeDriver(root, f.config.dataDir, {}, async () => ({
+      stdout: "",
+      stderr: "",
+    }));
+    await assert.rejects(
+      () =>
+        transaction(
+          {
+            ...driver,
+            build: async () => candidate,
+            quiesce: driver.hold,
+            health: async (release: string) => {
+              if (release === candidate) throw Error("candidate unhealthy");
+              assert.equal(
+                await realpath(path.join(root, "current")),
+                previous,
+              );
+            },
+          },
+          "candidate",
+        ),
+      /candidate unhealthy/,
+    );
+    assert.equal(await realpath(path.join(root, "current")), previous);
+    assert.equal(
+      JSON.parse(
+        await readFile(
+          path.join(f.config.dataDir, "update-status.json"),
+          "utf8",
+        ),
+      ).phase,
+      "rolled_back",
+    );
+    assert.equal(
+      await readFile(credentials, "utf8"),
+      '{"token":"preserve-credentials"}',
+    );
+    assert.equal(
+      await readFile(path.join(f.job.worktree!, "value"), "utf8"),
+      worktree,
+    );
+    const restored = f.reopen();
+    assert.deepEqual(f.store.list(), before);
+    assert.deepEqual(f.store.pauses(), pauses);
+    assert.deepEqual(restored.history(f.job.id), [attempt]);
+    assert.deepEqual(
+      new Planner(f.store, f.workspace, restored).read(plan.id),
+      plannerBefore,
     );
   } finally {
     await f.cleanup();

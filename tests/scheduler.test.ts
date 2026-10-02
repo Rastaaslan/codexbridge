@@ -76,7 +76,7 @@ async function fixture(
     add,
     async close() {
       await core.stop();
-      store.close();
+      if (store.db.isOpen) store.close();
       await rm(dir, { recursive: true, force: true });
     },
   };
@@ -600,3 +600,130 @@ for (const interruption of [false, true]) {
     }
   });
 }
+
+test("managed restart blocks active workers, freezes admission and resumes persisted queued and retry work exactly once", async () => {
+  let failWorker!: () => void;
+  const failure = new Promise<void>((resolve) => {
+    failWorker = resolve;
+  });
+  const f = await fixture(
+    { maxConcurrentJobs: 2, schedulerCapacity: 2, retryBackoffMs: 60000 },
+    async () => {
+      await failure;
+      throw new TransientRuntimeError("retry after restart");
+    },
+  );
+  let resumed: Orchestrator | undefined;
+  let reopened: Store | undefined;
+  try {
+    const retry = f.add();
+    await tick(f.core);
+    assert.equal(f.store.get(retry.id).status, "CODEX_RUNNING");
+    let controls = 0;
+    let finishControl!: () => void;
+    const controlPending = new Promise<void>((resolve) => {
+      finishControl = resolve;
+    });
+    const restart = toolDefinitions(f.core, {
+      control: async (action) => {
+        assert.equal(action, "restart");
+        controls++;
+        await controlPending;
+      },
+    }).find((t) => t.name === "restart_service")!;
+    await assert.rejects(restart.run({}), /Service busy/);
+    assert.equal(controls, 0);
+    assert.equal(f.core.restarting, false);
+    failWorker();
+    for (let i = 0; i < 100 && f.store.get(retry.id).status !== "FAILED"; i++)
+      await flush();
+    assert.equal(f.store.get(retry.id).status, "FAILED");
+    f.core.git.resolve = async () => "a".repeat(40);
+    const plan = (
+      await f.core.planner.create({
+        name: "Restart",
+        repository: "/b",
+        startRef: "HEAD",
+        features: [{ key: "queued", title: "Queued", ticket: "Resume once" }],
+      })
+    ).roadmap;
+    f.core.planner.validate(plan.id, 1);
+    const applied = f.core.planner.apply(plan.id, 1);
+    const queuedId = applied.roadmap.bindings.queued.jobId;
+    f.store.setPause({
+      scope: "repository",
+      target: "/unrelated",
+      paused: true,
+    });
+    f.store.patch(retry.id, {
+      retry: {
+        ...f.store.get(retry.id).retry,
+        nextRetryAt: new Date(0).toISOString(),
+      },
+    });
+    const jobsBefore = f.store.list();
+    const pausesBefore = f.store.pauses();
+    const restarting = restart.run({});
+    assert.equal(controls, 1);
+    assert.equal(f.core.restarting, true);
+    // The old orchestrator is still live and both jobs are eligible, unpaused.
+    await tick(f.core);
+    await tick(f.core);
+    assert.deepEqual(f.store.list(), jobsBefore);
+    assert.equal(f.calls.length, 1);
+    await assert.rejects(
+      f.core.create({ title: "new", ticket: "blocked", repository: "/c" }),
+      /maintenance/,
+    );
+    await assert.rejects(f.core.integrate({}), /maintenance/);
+    await assert.rejects(restart.run({}), /Service busy/);
+    assert.equal(controls, 1);
+    finishControl();
+    assert.deepEqual(await restarting, { accepted: true });
+    await f.core.stop();
+    f.store.close();
+    reopened = new Store(f.file);
+    const runs: RunOptions[] = [];
+    resumed = new Orchestrator(
+      f.config,
+      reopened,
+      f.core.git,
+      {
+        async run(o) {
+          runs.push(o);
+          throw new HumanRequired("Work reached human checkpoint");
+        },
+      },
+      {
+        async review() {
+          throw Error("Unexpected review");
+        },
+      },
+    );
+    await resumed.recover();
+    assert.deepEqual(reopened.list(), jobsBefore);
+    assert.deepEqual(reopened.pauses(), pausesBefore);
+    assert.deepEqual(resumed.planner.read(plan.id).roadmap, applied.roadmap);
+    assert.equal(resumed.restarting, false);
+    for (let i = 0; i < 20; i++) await tick(resumed);
+    assert.deepEqual(
+      runs.map((o) => o.cwd).sort(),
+      [`/work/${retry.id}`, `/work/${queuedId}`].sort(),
+    );
+    const retried = runs.find((o) => o.cwd === `/work/${retry.id}`)!;
+    assert.equal(
+      retried.threadId,
+      jobsBefore.find((j) => j.id === retry.id)!.codexThreadId,
+    );
+    assert.equal(reopened.get(retry.id).retry.count, 1);
+    assert.equal(reopened.get(retry.id).retry.nextRetryAt, null);
+    assert.equal(reopened.get(retry.id).status, "WAITING_FOR_HUMAN");
+    assert.equal(reopened.get(queuedId).status, "WAITING_FOR_HUMAN");
+    assert.equal(reopened.list().length, 2);
+  } finally {
+    failWorker();
+    await resumed?.stop();
+    reopened?.close();
+    await f.close();
+  }
+});

@@ -1,0 +1,7 @@
+# Release readiness
+
+Use the authenticated `operational_summary` tool (or POST `/api/tools/operational_summary` with `{}`) for compact health, scheduler capacity, project/roadmap, integration, retry and human-attention counts. It excludes free-form job content and credentials. Existing `/health`, `server_doctor`, and `jobs_overview` responses are unchanged.
+
+Call `release_preflight` with `{"candidateRef":"<local-ref-or-commit>"}` before release validation. It reports current release, resolved candidate commit, database version and concrete blockers. It performs local read-only checks: it does not fetch, build, migrate, pause work or activate a release. Missing local candidate evidence fails closed. A healthy external tunnel is not required for application readiness.
+
+Both current and candidate release policies must declare `runtimeSchema: 1` and `sqliteSchema: 4`. The current release manifest must identify the checked-out commit. Missing rollback baseline, active workers/child processes/integrations, maintenance, unhealthy application, incompatible database, or an unsafe release checkout blocks readiness. A preflight success is a point-in-time operational check, not authorization to activate: candidate build/tests and activation-time quiescence and health checks remain required. Older releases without explicit SQLite compatibility evidence require operator verification of a schema-v4 rollback baseline.

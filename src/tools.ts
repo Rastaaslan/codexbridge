@@ -1,4 +1,11 @@
 import {
+  operationalSummary,
+  operationalSchema,
+  releasePreflight,
+  preflightInput,
+  preflightSchema,
+} from "./readiness.js";
+import {
   roadmapInputSchema,
   roadmapIdSchema,
   roadmapVersionSchema,
@@ -49,7 +56,10 @@ const diffSchema = z.strictObject({
   status: z.string(),
   truncated: z.boolean(),
 });
-export function toolDefinitions(core: Orchestrator) {
+export function toolDefinitions(
+  core: Orchestrator,
+  boundaries: { control?: typeof control } = {},
+) {
   const definitions: {
     name: string;
     description: string;
@@ -232,6 +242,24 @@ export function toolDefinitions(core: Orchestrator) {
     },
   ];
   definitions.push(
+    {
+      name: "operational_summary",
+      description:
+        "Read-only health, scheduler, roadmap, integration, retry and human-attention counts; excludes free-form runtime content.",
+      input: z.strictObject({}),
+      output: operationalSchema,
+      readOnly: true,
+      run: async () => operationalSummary(core),
+    },
+    {
+      name: "release_preflight",
+      description:
+        "Read-only local release readiness with concrete blockers. Does not fetch, build or activate a candidate; readiness is a point-in-time report.",
+      input: preflightInput,
+      output: preflightSchema,
+      readOnly: true,
+      run: async (a) => releasePreflight(core, a.candidateRef),
+    },
     {
       name: "create_roadmap",
       description:
@@ -429,7 +457,9 @@ export function toolDefinitions(core: Orchestrator) {
       readOnly: false,
       run: async () => {
         if (
+          core.restarting ||
           maintenance(core.config.dataDir) ||
+          core.scheduler().runningJobs > 0 ||
           core.store
             .list()
             .some(
@@ -443,7 +473,7 @@ export function toolDefinitions(core: Orchestrator) {
           );
         core.restarting = true;
         try {
-          await control("restart");
+          await (boundaries.control ?? control)("restart");
         } catch (e) {
           core.restarting = false;
           throw e;

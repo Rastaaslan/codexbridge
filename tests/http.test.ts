@@ -91,8 +91,25 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
         }),
       );
       const tools = await client.listTools();
-      assert.equal(tools.tools.length, 32);
+      assert.equal(tools.tools.length, 34);
       assert.ok(tools.tools.every((t) => t.outputSchema));
+      if (i === 0) {
+        const preflight = await client.callTool({
+          name: "release_preflight",
+          arguments: { candidateRef: "missing-release-candidate" },
+        });
+        assert.equal((preflight.structuredContent as any).ready, false);
+        assert.ok((preflight.structuredContent as any).blockers.length > 0);
+        const summary = await client.callTool({
+          name: "operational_summary",
+          arguments: {},
+        });
+        assert.equal(
+          typeof (summary.structuredContent as any).humanAttention,
+          "number",
+        );
+        assert.equal(JSON.stringify(summary).includes(config.token), false);
+      }
       const scheduler = await client.callTool({
         name: "get_scheduler",
         arguments: {},
@@ -166,7 +183,7 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
       }),
     );
     try {
-      assert.equal((await proxy.listTools()).tools.length, 32);
+      assert.equal((await proxy.listTools()).tools.length, 34);
       assert.deepEqual(
         (await proxy.callTool({ name: "list_jobs", arguments: {} }))
           .structuredContent,
