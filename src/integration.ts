@@ -162,6 +162,27 @@ export class Integration {
       .all(id)
       .map((r) => integrationSchema.parse(JSON.parse(String(r.data))));
   }
+  matchesAcceptedReview(id: string, attempt: Attempt) {
+    const job = this.store.get(id);
+    const row = this.store.db
+      .prepare("SELECT data FROM reviewed_snapshots WHERE job_id=?")
+      .get(id);
+    const review = this.store.reviews(id).at(-1);
+    if (
+      !row ||
+      review?.decision !== "ACCEPT" ||
+      review.iteration !== job.iteration
+    )
+      return false;
+    const sealed = snapshotSchema.parse(JSON.parse(String(row.data)));
+    return (
+      attempt.jobId === id &&
+      sealed.evidenceVersion === 2 &&
+      sealed.iteration === job.iteration &&
+      sealed.baseCommit === job.baseCommit &&
+      JSON.stringify(attempt.snapshot) === JSON.stringify(sealed)
+    );
+  }
   active(id: string) {
     return this.history(id).some((a) =>
       ["VERIFYING", "PUBLISHING"].includes(a.status),

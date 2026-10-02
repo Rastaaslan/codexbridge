@@ -1,3 +1,4 @@
+import { Planner } from "./planner.js";
 import { Integration } from "./integration.js";
 import type { Config } from "./config.js";
 import { Store } from "./database.js";
@@ -30,6 +31,7 @@ export function alive(pid: number | null) {
 }
 export class Orchestrator {
   readonly integration: Integration;
+  readonly planner: Planner;
   restarting = false;
   private running = new Map<
     string,
@@ -47,6 +49,7 @@ export class Orchestrator {
     private reviewer: Reviewer,
   ) {
     this.integration = new Integration(config, store, git);
+    this.planner = new Planner(store, git, this.integration);
     this.log = logger(config.dataDir);
     store.on("event", (jobId: string, type: string) => {
       if (!["CODEX_MESSAGE", "CODEX_OUTPUT"].includes(type))
@@ -84,6 +87,7 @@ export class Orchestrator {
         this.store.transition(job.id, "READY_FOR_HUMAN_TEST");
       if (!alive(job.childPid)) this.store.unlock(job.id);
     }
+    this.planner.reconcileAll();
   }
   start() {
     this.stopping = false;
@@ -153,6 +157,7 @@ export class Orchestrator {
             retry: { ...job.retry, nextRetryAt: null },
           });
       }
+      this.planner.reconcileAll();
       const score = (job: Job) =>
         Math.min(
           100,
@@ -176,7 +181,9 @@ export class Orchestrator {
         if (job.status !== "QUEUED") continue;
         let reason: string | null = null;
         if (job.schedulingState !== "READY") {
-          reason = `Dependencies ${job.dependencyState?.toLowerCase()}`;
+          reason = job.metadata.plannerWait
+            ? String(job.metadata.plannerWait)
+            : `Dependencies ${job.dependencyState?.toLowerCase()}`;
           if (job.readySince)
             job = this.store.patch(job.id, { readySince: null });
         } else {
@@ -229,6 +236,10 @@ export class Orchestrator {
             this.store.patch(job.id, { admissionReason: reason });
           continue;
         }
+        if (job.metadata.roadmapId)
+          this.store.patch(job.id, {
+            metadata: { ...job.metadata, plannerStarted: true },
+          });
         const controller = new AbortController();
         const promise = this.run(job.id, controller.signal).finally(() => {
           this.running.delete(job.id);

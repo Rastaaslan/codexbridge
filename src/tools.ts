@@ -1,3 +1,11 @@
+import {
+  roadmapInputSchema,
+  roadmapIdSchema,
+  roadmapVersionSchema,
+  roadmapRevisionSchema,
+  plannerReadSchema,
+  plannerSummarySchema,
+} from "./planner.js";
 import { integrationInputSchema, integrationSchema } from "./integration.js";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -223,6 +231,74 @@ export function toolDefinitions(core: Orchestrator) {
       run: async (a: any) => core.git.diff(core.store.get(a.id)),
     },
   ];
+  definitions.push(
+    {
+      name: "create_roadmap",
+      description:
+        "Persist a roadmap and pinned baseline without creating jobs. Dependencies require completion; inheritFrom selects one explicit predecessor integration as the code baseline.",
+      input: roadmapInputSchema,
+      output: plannerReadSchema,
+      readOnly: false,
+      run: async (a) => core.planner.create(a),
+    },
+    {
+      name: "validate_roadmap",
+      description:
+        "Explicit dry-run validation of a roadmap version. Creates no jobs.",
+      input: roadmapVersionSchema,
+      output: plannerReadSchema,
+      readOnly: false,
+      run: async (a) => core.planner.validate(a.id, a.version),
+    },
+    {
+      name: "revise_roadmap",
+      description:
+        "Revise future work using optimistic version checking. Requires validation and apply again.",
+      input: roadmapRevisionSchema,
+      output: plannerReadSchema,
+      readOnly: false,
+      run: async (a) => core.planner.revise(a.id, a.version, a.roadmap),
+    },
+    {
+      name: "apply_roadmap",
+      description:
+        "Atomically materialize a validated roadmap version. Never integrates code.",
+      input: roadmapVersionSchema,
+      output: plannerReadSchema,
+      readOnly: false,
+      run: async (a) => {
+        const result = core.planner.apply(a.id, a.version);
+        void core.tick();
+        return result;
+      },
+    },
+    {
+      name: "reconcile_roadmap",
+      description:
+        "Reconcile persisted jobs and explicit integration results. Never performs integration.",
+      input: roadmapIdSchema,
+      output: plannerReadSchema,
+      readOnly: false,
+      run: async (a) => core.planner.reconcile(a.id),
+    },
+    {
+      name: "get_roadmap",
+      description: "Read persistent roadmap and feature execution states.",
+      input: roadmapIdSchema,
+      output: plannerReadSchema,
+      readOnly: true,
+      run: async (a) => core.planner.read(a.id),
+    },
+    {
+      name: "get_roadmap_summary",
+      description:
+        "Compact project execution summary: runnable features, blockers, integration waits, failures and human attention.",
+      input: roadmapIdSchema,
+      output: plannerSummarySchema,
+      readOnly: true,
+      run: async (a) => core.planner.summary(a.id),
+    },
+  );
   for (const [name, action, description] of [
     [
       "send_instruction",

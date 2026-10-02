@@ -380,7 +380,7 @@ test("every MCP tool declares strict input and structured output", async () => {
   const f = await fixture();
   try {
     const definitions = toolDefinitions(f.core);
-    assert.equal(definitions.length, 25);
+    assert.equal(definitions.length, 32);
     for (const t of definitions)
       assert.equal(t.input.safeParse({ unexpected: true }).success, false);
     const create = definitions.find((t) => t.name === "create_job")!;
@@ -650,7 +650,7 @@ test("P1 hierarchy, DAG validation, blocked states, idempotency and v1 migration
       .run(JSON.stringify(legacyJson), legacy.id);
     // Reconstruct the v1 schema while preserving old JSON and CB sequence.
     f.store.db.exec(
-      "DROP TABLE integrations; DROP TABLE reviewed_snapshots; DROP TABLE job_dependencies; DROP TABLE job_hierarchy; DROP TABLE features; DROP TABLE projects; PRAGMA user_version=1;",
+      "DROP TABLE roadmap_versions; DROP TABLE roadmaps; DROP TABLE integrations; DROP TABLE reviewed_snapshots; DROP TABLE job_dependencies; DROP TABLE job_hierarchy; DROP TABLE features; DROP TABLE projects; PRAGMA user_version=1;",
     );
     f.store.close();
     const store = new Store(path.join(f.config.dataDir, "codexbridge.db"));

@@ -26,7 +26,7 @@ export class Store extends EventEmitter {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 3)
+    if (version > 4)
       throw new Error("Database is newer than this codexbridge version.");
     if (version === 0)
       this.db.exec(`BEGIN IMMEDIATE;
@@ -53,6 +53,11 @@ export class Store extends EventEmitter {
         CREATE TABLE integrations (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL REFERENCES jobs(id), repository TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
         CREATE UNIQUE INDEX integration_active ON integrations(repository) WHERE status IN ('VERIFYING','PUBLISHING');
         PRAGMA user_version=3; COMMIT;`);
+    if (version < 4)
+      this.db.exec(`BEGIN IMMEDIATE;
+        CREATE TABLE roadmaps (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+        CREATE TABLE roadmap_versions (id TEXT NOT NULL REFERENCES roadmaps(id), version INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(id,version));
+        PRAGMA user_version=4; COMMIT;`);
   }
   createProject(input: unknown) {
     const { name } = projectInputSchema.parse(input);
@@ -143,9 +148,11 @@ export class Store extends EventEmitter {
         .prepare("INSERT INTO job_dependencies VALUES(?,?)")
         .run(id, dependency);
   }
-  setDependencies(id: string, dependencies: string[]) {
+  setDependencies(id: string, dependencies: string[], planner = false) {
     return this.transaction(() => {
       const job = this.get(id);
+      if (job.metadata.roadmapId && !planner)
+        throw Error("Use roadmap revisions to change planner dependencies");
       if (job.status !== "QUEUED" || job.worktree || job.iteration !== 0)
         throw Error("Dependencies can only change before a queued job starts");
       this.writeDependencies(id, dependencies);
@@ -218,19 +225,24 @@ export class Store extends EventEmitter {
       schedulingState:
         raw.status !== "QUEUED"
           ? "INACTIVE"
-          : dependencyState === "SATISFIED"
-            ? "READY"
-            : dependencyState,
+          : raw.metadata?.plannerWait
+            ? "WAITING"
+            : dependencyState === "SATISFIED"
+              ? "READY"
+              : dependencyState,
     };
   }
   transaction<T>(fn: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
+    const nested = this.db.isTransaction;
+    this.db.exec(nested ? "SAVEPOINT nested_store" : "BEGIN IMMEDIATE");
     try {
       const x = fn();
-      this.db.exec("COMMIT");
+      this.db.exec(nested ? "RELEASE nested_store" : "COMMIT");
       return x;
     } catch (e) {
-      this.db.exec("ROLLBACK");
+      this.db.exec(
+        nested ? "ROLLBACK TO nested_store; RELEASE nested_store" : "ROLLBACK",
+      );
       throw e;
     }
   }

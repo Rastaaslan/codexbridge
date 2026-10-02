@@ -448,3 +448,87 @@ test("legacy snapshots require canonical review evidence before integration", as
     await f.cleanup();
   }
 });
+
+test("planner refuses an integrated predecessor's obsolete review after rejection, rework and restart", async () => {
+  let revision = 0;
+  const f = await fixture({
+    async edit(cwd) {
+      await writeFile(path.join(cwd, "revision"), String(++revision));
+    },
+  });
+  try {
+    const p = (
+      await f.core.planner.create({
+        name: "Rework",
+        repository: f.repo,
+        startRef: "HEAD",
+        features: [
+          { key: "source", title: "Source", ticket: "Implement source" },
+          {
+            key: "next",
+            title: "Next",
+            ticket: "Use source",
+            dependencies: ["source"],
+            inheritFrom: "source",
+          },
+        ],
+      })
+    ).roadmap;
+    f.core.planner.validate(p.id, 1);
+    const applied = f.core.planner.apply(p.id, 1).roadmap;
+    const source = applied.bindings.source.jobId,
+      next = applied.bindings.next.jobId;
+    const reviewed = async () => {
+      for (
+        let i = 0;
+        i < 300 && f.store.get(source).status !== "READY_FOR_HUMAN_TEST";
+        i++
+      ) {
+        await f.core.tick();
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(f.store.get(source).status, "READY_FOR_HUMAN_TEST");
+    };
+    await reviewed();
+    const request = { id: source, target: "rework", expectedBase: f.base };
+    const original = await f.core.integrate(request);
+    assert.equal(original.status, "SUCCEEDED", original.failure ?? "");
+    await f.core.action(source, "reject", "Revise the implementation");
+    await reviewed();
+    assert.notEqual(
+      (await f.core.integration.snapshot(f.store.get(source))).tree,
+      original.snapshot!.tree,
+    );
+    await f.core.action(source, "approve");
+    await f.core.tick();
+    f.core.planner.reconcileAll();
+    assert.equal(f.store.get(next).schedulingState, "WAITING");
+    assert.equal(f.store.get(next).worktree, null);
+    assert.notEqual(f.store.get(next).startRef, original.resultCommit);
+    assert.match(
+      f.core.planner.summary(p.id).integrationWaits[0].reason!,
+      /current sealed accepted review/,
+    );
+    await assert.rejects(f.core.integrate(request), /review changed/);
+    await f.core.stop();
+    const integration = f.reopen();
+    const { Planner } = await import("../src/planner.js");
+    const planner = new Planner(f.store, f.workspace, integration);
+    await integration.recover();
+    planner.reconcileAll();
+    planner.reconcileAll();
+    assert.equal(f.store.get(next).schedulingState, "WAITING");
+    assert.equal(f.store.get(next).metadata.integrationId, null);
+    assert.equal(planner.summary(p.id).nextRunnable.length, 0);
+    assert.match(
+      planner.read(p.id).features[1].reason!,
+      /explicitly integrate/,
+    );
+    assert.equal(
+      await git(f.repo, ["rev-parse", original.ref]),
+      original.resultCommit,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
