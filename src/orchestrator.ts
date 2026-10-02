@@ -1,3 +1,4 @@
+import { Integration } from "./integration.js";
 import type { Config } from "./config.js";
 import { Store } from "./database.js";
 import { GitWorkspace } from "./git.js";
@@ -24,6 +25,7 @@ export function alive(pid: number | null) {
   }
 }
 export class Orchestrator {
+  readonly integration: Integration;
   restarting = false;
   private running = new Map<
     string,
@@ -40,6 +42,7 @@ export class Orchestrator {
     private adapter: CodexAdapter,
     private reviewer: Reviewer,
   ) {
+    this.integration = new Integration(config, store, git);
     this.log = logger(config.dataDir);
     store.on("event", (jobId: string, type: string) => {
       if (!["CODEX_MESSAGE", "CODEX_OUTPUT"].includes(type))
@@ -47,6 +50,7 @@ export class Orchestrator {
     });
   }
   async recover() {
+    await this.integration.recover();
     for (const job of this.store.list()) {
       if (activeStatuses.includes(job.status)) {
         let state = "No worktree created.";
@@ -84,6 +88,12 @@ export class Orchestrator {
     if (this.timer) clearInterval(this.timer);
     for (const r of this.running.values()) r.controller.abort();
     await Promise.allSettled([...this.running.values()].map((r) => r.promise));
+    await this.integration.settle();
+  }
+  async integrate(input: unknown) {
+    if (this.restarting || maintenance(this.config.dataDir) || this.stopping)
+      throw Error("Service stopping or maintenance in progress");
+    return this.integration.integrate(input);
   }
   async create(input: unknown) {
     if (this.restarting || maintenance(this.config.dataDir))
@@ -194,7 +204,8 @@ export class Orchestrator {
         return;
       }
       job = this.store.transition(id, "REVIEWING");
-      const diff = await this.git.diff(job);
+      const snapshot = await this.integration.snapshot(job);
+      const diff = await this.integration.reviewDiff(job, snapshot);
       const review = await this.reviewer.review(
         { job, diff, history: this.store.reviews(id) },
         callbacks,
@@ -223,6 +234,12 @@ export class Orchestrator {
         return;
       }
       if (review.decision === "ACCEPT") {
+        if (
+          JSON.stringify(snapshot) !==
+          JSON.stringify(await this.integration.snapshot(job))
+        )
+          throw Error("Reviewed-diff drift during review");
+        this.integration.seal(id, snapshot);
         this.store.transition(id, "ACCEPTED");
         this.store.transition(id, "READY_FOR_HUMAN_TEST");
         return;
@@ -250,6 +267,7 @@ export class Orchestrator {
     }
   }
   async action(id: string, action: string, instruction = "") {
+    if (this.integration.active(id)) throw Error("Integration in progress");
     const job = this.store.get(id);
     if (action === "cancel") {
       if (job.status === "CANCELLED") return job;
@@ -310,8 +328,9 @@ export class Orchestrator {
       changes,
       reviews: this.store.reviews(id),
       humanDecisions: this.store.decisions(id),
+      integrations: this.integration.history(id),
       humanTestingInstructions: job.worktree
-        ? `Inspect ${job.worktree}, run the reported tests and your functional checks. Approve to mark COMPLETED. Integration and push remain explicit manual actions.`
+        ? `Inspect ${job.worktree}, run the reported tests and your functional checks. Approve to mark COMPLETED. Use integrate_job explicitly to create a verified local baseline.`
         : "Worktree not prepared yet.",
     };
   }

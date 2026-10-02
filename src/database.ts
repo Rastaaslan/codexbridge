@@ -25,7 +25,7 @@ export class Store extends EventEmitter {
     const version = (
       this.db.prepare("PRAGMA user_version").get() as { user_version: number }
     ).user_version;
-    if (version > 2)
+    if (version > 3)
       throw new Error("Database is newer than this codexbridge version.");
     if (version === 0)
       this.db.exec(`BEGIN IMMEDIATE;
@@ -46,6 +46,12 @@ export class Store extends EventEmitter {
         CREATE TABLE job_dependencies (job_id TEXT NOT NULL REFERENCES jobs(id), dependency_id TEXT NOT NULL REFERENCES jobs(id), PRIMARY KEY(job_id, dependency_id), CHECK(job_id != dependency_id));
         CREATE INDEX dependencies_target ON job_dependencies(dependency_id);
         PRAGMA user_version=2; COMMIT;`);
+    if (version < 3)
+      this.db.exec(`BEGIN IMMEDIATE;
+        CREATE TABLE reviewed_snapshots (job_id TEXT PRIMARY KEY REFERENCES jobs(id), data TEXT NOT NULL);
+        CREATE TABLE integrations (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL REFERENCES jobs(id), repository TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
+        CREATE UNIQUE INDEX integration_active ON integrations(repository) WHERE status IN ('VERIFYING','PUBLISHING');
+        PRAGMA user_version=3; COMMIT;`);
   }
   createProject(input: unknown) {
     const { name } = projectInputSchema.parse(input);

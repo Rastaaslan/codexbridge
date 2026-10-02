@@ -119,3 +119,59 @@ Readiness is recomputed from persisted lifecycle state after restart. Existing
 interrupted-worker recovery and the worker/reviewer/corrections/human-test loop
 are unchanged. Dependencies express scheduling order; they do not merge upstream
 worktrees or change a job's Git base. Integration remains an explicit manual action.
+
+### Local reviewed integration (P2)
+
+Reviewer acceptance never integrates a job. After a job reaches
+`READY_FOR_HUMAN_TEST` or `COMPLETED`, explicitly call `integrate_job` with:
+
+```json
+{"id":"CB-12","target":"feature-chain","expectedBase":"<full source base commit>"}
+```
+
+The MCP tool and authenticated `POST /api/tools/integrate_job` endpoint share
+strict schemas. The only ref advanced is
+`refs/codexbridge/integration/feature-chain`. For an existing target,
+`expectedBase` must match both that ref and the source job's pinned base.
+Start each subsequent job with the preceding successful `resultCommit` (immutable)
+or integration `ref` (resolved and pinned at job creation). This deliberately
+rejects stale parallel changes instead of automatically merging them.
+
+Configure administrator-owned verification commands in `config.json`:
+
+```json
+"integrationCommands": [
+  {"command":"npm","args":["ci"],"timeoutMs":300000},
+  {"command":"npm","args":["run","check"],"timeoutMs":300000}
+]
+```
+
+At least one command is required. Commands execute as the service user without
+shell interpolation in a detached candidate worktree. Use trusted local test
+commands: this is not a sandbox for malicious scripts, and verification commands
+must not publish or mutate other worktrees. Unignored candidate changes or a
+changed candidate HEAD cause failure. Ignored build artifacts are allowed.
+
+Review seals the full tracked/untracked Git tree, source HEAD, base, iteration,
+and working status. Capture preserves staged additions, including force-added
+ignored files, without changing the source index. Reviewer evidence is generated
+from that exact immutable tree, including working changes hidden by
+assume-unchanged flags. Snapshots captured before canonical review evidence was
+introduced require another review before integration. Drift or unexpected repository dirt is refused. Existing
+accepted jobs without a sealed snapshot need another review. Submodules are
+currently refused. Source worktrees and their real indexes are preserved.
+Integration creates a single commit with the reviewed tree and intended baseline
+as its parent; source commit topology is not replayed. No push, deployment,
+main/master update, or human approval is implied.
+
+`get_job_integrations` and `get_job_report.integrations` expose independent
+`VERIFYING`, `PUBLISHING`, `SUCCEEDED`, and `FAILED` attempts, including command
+outputs, exit codes, timestamps, reviewed identity and resulting commit.
+An empty history means integration was never requested. Failed attempts can be
+retried explicitly; identical successful requests return the original result.
+Conflicting concurrent attempts per repository and conflicting successful
+requests fail clearly. The ref update uses compare-and-swap, so failed validation
+cannot replace a successful baseline. On restart, an interrupted publication is
+reconciled against its persisted candidate commit; other interrupted attempts
+are failed and require an explicit retry. Interrupted candidate directories may
+remain for diagnosis; retries use a fresh directory.

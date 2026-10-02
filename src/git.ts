@@ -5,7 +5,11 @@ import path from "node:path";
 import type { Config } from "./config.js";
 import type { Job } from "./domain.js";
 const exec = promisify(execFile);
-export async function git(cwd: string, args: string[]) {
+export async function git(
+  cwd: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = {},
+) {
   const { stdout } = await exec(
     "git",
     ["-c", "core.hooksPath=/dev/null", ...args],
@@ -18,6 +22,7 @@ export async function git(cwd: string, args: string[]) {
         ...process.env,
         GIT_TERMINAL_PROMPT: "0",
         GIT_OPTIONAL_LOCKS: "0",
+        ...env,
       },
     },
   );

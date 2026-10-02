@@ -91,7 +91,7 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
         }),
       );
       const tools = await client.listTools();
-      assert.equal(tools.tools.length, 21);
+      assert.equal(tools.tools.length, 23);
       assert.ok(tools.tools.every((t) => t.outputSchema));
       const result = await client.callTool({
         name: "list_jobs",
@@ -123,7 +123,7 @@ test("HTTP auth, origin, dashboard and actual MCP handshake/list/call/reconnect"
       }),
     );
     try {
-      assert.equal((await proxy.listTools()).tools.length, 21);
+      assert.equal((await proxy.listTools()).tools.length, 23);
       assert.deepEqual(
         (await proxy.callTool({ name: "list_jobs", arguments: {} }))
           .structuredContent,

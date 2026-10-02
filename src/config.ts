@@ -16,6 +16,16 @@ export const configSchema = z.strictObject({
   port: z.number().int().min(1).max(65535).default(3847),
   repositoryRoots: z.array(z.string()).default([]),
   maxConcurrentJobs: z.number().int().min(1).max(10).default(10),
+  integrationCommands: z
+    .array(
+      z.strictObject({
+        command: z.string().min(1),
+        args: z.array(z.string()).default([]),
+        timeoutMs: z.number().int().min(100).max(3600000).default(300000),
+      }),
+    )
+    .max(50)
+    .default([]),
   codexCommand: z.string().default("codex"),
   model: z.string().optional(),
   reviewer: z.enum(["codex", "openai"]).default("codex"),

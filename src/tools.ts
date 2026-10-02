@@ -1,3 +1,4 @@
+import { integrationInputSchema, integrationSchema } from "./integration.js";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
@@ -46,6 +47,24 @@ export function toolDefinitions(core: Orchestrator) {
     readOnly: boolean;
     run: (a: any) => Promise<any>;
   }[] = [
+    {
+      name: "integrate_job",
+      description:
+        "Explicitly verify reviewed changes and advance a controlled local integration ref. expectedBase must equal the source base and current target baseline. Never pushes.",
+      input: integrationInputSchema,
+      output: z.strictObject({ integration: integrationSchema }),
+      readOnly: false,
+      run: async (a) => ({ integration: await core.integrate(a) }),
+    },
+    {
+      name: "get_job_integrations",
+      description:
+        "Read persistent integration attempts, verification results and baseline commits.",
+      input: idSchema,
+      output: z.strictObject({ integrations: z.array(integrationSchema) }),
+      readOnly: true,
+      run: async (a) => ({ integrations: core.integration.history(a.id) }),
+    },
     {
       name: "create_project",
       description: "Create a persistent project grouping features and jobs.",
@@ -167,6 +186,7 @@ export function toolDefinitions(core: Orchestrator) {
         changes: z.unknown(),
         reviews: z.array(z.unknown()),
         humanDecisions: z.array(z.unknown()),
+        integrations: z.array(integrationSchema),
         humanTestingInstructions: z.string(),
       }),
       readOnly: true,
@@ -299,7 +319,13 @@ export function toolDefinitions(core: Orchestrator) {
       run: async () => {
         if (
           maintenance(core.config.dataDir) ||
-          core.store.list().some((j) => activeStatuses.includes(j.status))
+          core.store
+            .list()
+            .some(
+              (j) =>
+                activeStatuses.includes(j.status) ||
+                core.integration.active(j.id),
+            )
         )
           throw Error(
             "Service busy; wait or cancel active jobs before restart.",
