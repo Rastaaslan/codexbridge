@@ -136,6 +136,7 @@ test("real update health and boot recovery retain maintenance ordering with a de
       );
     },
   );
+  driver.validateRollback = async () => {}; // Compatibility is covered by update tests.
   driver.current = async () => selected;
   driver.build = async () => candidate;
   driver.activate = async (value: string) => {
@@ -193,6 +194,7 @@ test("application failure still rolls back and failed boot validation retains ma
   const driver = {
     current: async () => selected,
     build: async () => "new",
+    validateRollback: async () => {},
     save: async (value: any) => {
       state = value;
     },

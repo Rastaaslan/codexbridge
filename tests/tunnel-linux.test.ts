@@ -105,10 +105,7 @@ test("Linux status combines owned PID with loopback health, without CLI calls", 
   assert.equal(status.ready, true);
   assert.deepEqual(
     io.requests.map(([url]) => url),
-    [
-      "http://127.0.0.1:12345/healthz",
-      "http://127.0.0.1:12345/readyz",
-    ],
+    ["http://127.0.0.1:12345/healthz", "http://127.0.0.1:12345/readyz"],
   );
   for (const options of [
     { alive: false },

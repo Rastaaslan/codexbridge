@@ -7,7 +7,14 @@ import {
   validateRef,
   atomicJson,
 } from "../scripts/self-update.mjs";
-import { mkdtemp, readFile, writeFile, mkdir } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  writeFile,
+  mkdir,
+  symlink,
+  realpath,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -30,6 +37,10 @@ function fixture(fail = "") {
       events.push("build:" + ref);
       if (fail === "build") throw Error("build failed");
       return "new";
+    },
+    validateRollback: async () => {
+      events.push("validateRollback");
+      if (fail === "baseline") throw Error("Incompatible rollback baseline");
     },
     quiesce: async () => {
       maintenance = true;
@@ -77,6 +88,7 @@ test("update prepares, journals, switches, restarts, checks health, then resumes
   assert.deepEqual(f.events, [
     "save:building",
     "build:refs/tags/v2",
+    "validateRollback",
     "save:prepared",
     "quiesce",
     "save:activating",
@@ -91,6 +103,7 @@ test("update prepares, journals, switches, restarts, checks health, then resumes
 });
 for (const stage of [
   "build",
+  "baseline",
   "busy",
   "activate",
   "restart",
@@ -101,7 +114,7 @@ for (const stage of [
     const f = fixture(stage);
     await assert.rejects(() => transaction(f.driver, "main"));
     assert.equal(f.current, "old");
-    if (["build", "busy"].includes(stage)) {
+    if (["build", "baseline", "busy"].includes(stage)) {
       assert.equal(
         f.events.some((e) => e.startsWith("activate:")),
         false,
@@ -209,7 +222,7 @@ test("real fetch pins the requested tag and validates isolated candidate before 
   await git(["config", "user.email", "test@example.invalid"]);
   await writeFile(
     path.join(repo, "deploy/debian/release-policy.json"),
-    '{"runtimeSchema":1}',
+    '{"runtimeSchema":1,"sqliteSchema":4}',
   );
   await writeFile(path.join(repo, "version.txt"), "old");
   await git(["add", "."]);
@@ -248,6 +261,63 @@ test("real fetch pins the requested tag and validates isolated candidate before 
     validation.map((a) => a.slice(0, 2)),
     [["ci", "--ignore-scripts"], ["run", "build"], ["test"]],
   );
+  assert.equal(
+    await readFile(path.join(data, "codexbridge.db"), "utf8"),
+    "runtime sentinel",
+  );
+  await driver.validateRollback(candidate, candidate);
+  const previous = path.join(root, "releases", "legacy");
+  await execute("git", ["clone", candidate, previous]);
+  const previousGit = (args: string[]) =>
+    execute("git", ["-C", previous, ...args]);
+  await writeFile(
+    path.join(previous, "deploy/debian/release-policy.json"),
+    '{"runtimeSchema":1,"sqliteSchema":3}',
+  );
+  await previousGit(["add", "."]);
+  await previousGit([
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.invalid",
+    "commit",
+    "-m",
+    "legacy schema",
+  ]);
+  await writeFile(
+    path.join(previous, "release.json"),
+    JSON.stringify({
+      commit: (await previousGit(["rev-parse", "HEAD"])).stdout.trim(),
+    }),
+  );
+  await symlink(previous, path.join(root, "current"));
+  await assert.rejects(
+    () => driver.validateRollback(previous, candidate),
+    /schema-v4 rollback baseline/,
+  );
+  await assert.rejects(
+    () => driver.activate(candidate),
+    /schema-v4 rollback baseline/,
+  );
+  assert.equal(await realpath(path.join(root, "current")), previous);
+  // Merely editing the policy cannot fabricate a compatible committed baseline.
+  await writeFile(
+    path.join(previous, "deploy/debian/release-policy.json"),
+    '{"runtimeSchema":1,"sqliteSchema":4}',
+  );
+  await assert.rejects(
+    () => driver.validateRollback(previous, candidate),
+    /schema-v4 rollback baseline/,
+  );
+  await writeFile(
+    path.join(candidate, "release.json"),
+    JSON.stringify({ commit: "0".repeat(40) }),
+  );
+  await assert.rejects(
+    () => driver.activate(candidate),
+    /schema-v4 rollback baseline/,
+  );
+  assert.equal(await realpath(path.join(root, "current")), previous);
   assert.equal(
     await readFile(path.join(data, "codexbridge.db"), "utf8"),
     "runtime sentinel",

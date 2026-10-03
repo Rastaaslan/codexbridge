@@ -213,6 +213,14 @@ async function main() {
     store.close();
     unlinkSync(lockFile);
   };
+  // Do not expose mutation endpoints until startup recovery has settled.
+  try {
+    await core.recover();
+  } catch (error) {
+    store.close();
+    unlinkSync(lockFile);
+    throw error;
+  }
   const server = createApp(core, () => void close()).listen(
     c.port,
     c.host,
@@ -233,7 +241,6 @@ async function main() {
         server.once("error", reject);
       }
     });
-    await core.recover();
     core.start();
   } catch (e) {
     await close();

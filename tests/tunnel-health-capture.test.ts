@@ -67,7 +67,10 @@ test("diagnostic preserves URL-file bytes and probes official health routes", as
       calls.push(url);
       assert.equal(options.redirect, "error");
       const status = url.includes("/readyz") ? 503 : 200;
-      return new Response(url.includes("/health?") ? '{"ready":false}' : "probe\n", { status });
+      return new Response(
+        url.includes("/health?") ? '{"ready":false}' : "probe\n",
+        { status },
+      );
     },
   );
   assert.equal(result.urlFile, raw);

@@ -56,7 +56,15 @@ export class Orchestrator {
         this.log(type === "CODEX_ERROR" ? "warn" : "info", type, jobId);
     });
   }
-  async recover() {
+  private recovery?: Promise<void>;
+  recover() {
+    if (this.recovery) return this.recovery;
+    this.recovery = this.recoverJobs().finally(() => {
+      this.recovery = undefined;
+    });
+    return this.recovery;
+  }
+  private async recoverJobs() {
     await this.integration.recover();
     for (const job of this.store.list()) {
       if (activeStatuses.includes(job.status)) {
@@ -69,6 +77,9 @@ export class Orchestrator {
         } catch (e) {
           state = errorMessage(e);
         }
+        // A cancellation or other mutation during Git inspection wins.
+        if (JSON.stringify(this.store.get(job.id)) !== JSON.stringify(job))
+          continue;
         const message = `Interrupted service. ${state} ${alive(job.childPid) ? "Old Codex process still alive; retry is blocked until it exits." : "Retry resumes the saved thread and inspects existing changes before continuing."}`;
         this.store.patch(job.id, {
           metadata: { ...job.metadata, recoveredFrom: job.status },
@@ -102,11 +113,13 @@ export class Orchestrator {
     await this.integration.settle();
   }
   async integrate(input: unknown) {
+    if (this.recovery) await this.recovery;
     if (this.restarting || maintenance(this.config.dataDir) || this.stopping)
       throw Error("Service stopping or maintenance in progress");
     return this.integration.integrate(input);
   }
   async create(input: unknown) {
+    if (this.recovery) await this.recovery;
     if (this.restarting || maintenance(this.config.dataDir))
       throw new Error("Update maintenance in progress; retry shortly.");
     const parsed = createSchema.parse(input);
@@ -132,7 +145,8 @@ export class Orchestrator {
       this.restarting ||
       maintenance(this.config.dataDir) ||
       this.stopping ||
-      this.ticking
+      this.ticking ||
+      this.recovery
     )
       return;
     this.ticking = true;
@@ -278,6 +292,7 @@ export class Orchestrator {
     target: string;
     paused: boolean;
   }) {
+    if (this.recovery) await this.recovery;
     if (input.scope === "repository")
       input = { ...input, target: await this.git.repository(input.target) };
     const control = this.store.setPause(input);
@@ -437,6 +452,7 @@ export class Orchestrator {
     }
   }
   async action(id: string, action: string, instruction = "") {
+    if (this.recovery) await this.recovery;
     if (this.integration.active(id)) throw Error("Integration in progress");
     const job = this.store.get(id);
     if (action === "cancel") {

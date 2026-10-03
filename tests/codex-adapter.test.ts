@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, readFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { z } from "zod";
@@ -9,12 +9,37 @@ import {
   HumanRequired,
   TransientRuntimeError,
 } from "../src/codex.js";
+import { git, inside } from "../src/git.js";
 import { configSchema } from "../src/config.js";
 
 // Real child processes speak the app-server wire protocol. Failures originate
 // at the production adapter boundary, not from injected adapter exceptions.
-async function fixture(mode: string, timeoutMs = 10000) {
+async function fixture(
+  mode: string,
+  timeoutMs = 10000,
+  readOnly = true,
+  resume = false,
+) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "cb-adapter-"));
+  let cwd = dir;
+  if (!readOnly) {
+    const repo = path.join(dir, "repo");
+    await mkdir(repo);
+    await git(repo, ["init"]);
+    await git(repo, [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "fixture",
+    ]);
+    cwd = path.join(dir, "worktree");
+    await git(repo, ["worktree", "add", "-b", "codexbridge/CB-1", cwd]);
+  }
+  const wire = path.join(dir, "wire.jsonl");
   const command = path.join(dir, "worker.cjs");
   await writeFile(
     command,
@@ -29,6 +54,7 @@ process.stdin.on('end', () => {
 });
 createInterface({ input: process.stdin }).on('line', line => {
   const m = JSON.parse(line);
+  require("node:fs").appendFileSync(${JSON.stringify(wire)}, JSON.stringify(m) + "\\n");
   if (m.method === 'initialize') {
     if (mode === 'rpc-timeout') return;
     if (mode === 'transport') {
@@ -37,12 +63,16 @@ createInterface({ input: process.stdin }).on('line', line => {
     }
     send({ id: m.id, result: {} });
   } else if (m.method === 'config/read') {
-    send({ id: m.id, result: { config: {} } });
-  } else if (m.method === 'thread/start') {
+    send({ id: m.id, result: { config: { mcp_servers: { external: {} }, plugins: { external: {} } } } });
+  } else if ((m.method === 'thread/start' || m.method === 'thread/resume')) {
     send({ id: m.id, result: { thread: { id: 'thread-one' } } });
   } else if (m.method === 'turn/start') {
     send({ id: m.id, result: {} });
     send({ method: 'turn/started', params: { turn: { id: 'turn-one' }, threadId: 'thread-one' } });
+    if (mode === 'success') {
+      send({ method: 'item/completed', params: { item: { type: 'agentMessage', text: '{"ok":true}' } } });
+      send({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
+    }
     if (mode === 'signal') process.kill(process.pid, 'SIGKILL');
     if (mode === 'exit') process.exit(1);
     if (mode === 'human') send({ id: 99, method: 'item/tool/requestUserInput', params: { question: 'Choose a product' } });
@@ -66,10 +96,11 @@ createInterface({ input: process.stdin }).on('line', line => {
   const events: string[] = [];
   const run = () =>
     adapter.run({
-      cwd: dir,
+      cwd,
+      threadId: resume ? "saved-thread" : undefined,
       prompt: "Test",
       schema: z.strictObject({ ok: z.boolean() }),
-      readOnly: true,
+      readOnly,
       signal: controller.signal,
       onPid: (pid) => pids.push(pid),
       onThread: () => {},
@@ -81,6 +112,9 @@ createInterface({ input: process.stdin }).on('line', line => {
     });
   return {
     run,
+    cwd,
+    wire,
+    dir,
     pids,
     events,
     async close() {
@@ -180,3 +214,80 @@ for (const [mode, message, human] of [
     },
   );
 }
+
+for (const resume of [false, true])
+  test(`ordinary worker least privilege on ${resume ? "resume" : "start"}`, async () => {
+    const f = await fixture("success", 10000, false, resume);
+    try {
+      assert.deepEqual(await f.run(), { ok: true });
+      const messages = (await readFile(f.wire, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const thread = messages.find(
+        (m) => m.method === (resume ? "thread/resume" : "thread/start"),
+      ).params;
+      const policy = messages.find((m) => m.method === "turn/start").params
+        .sandboxPolicy;
+      assert.equal(thread.approvalPolicy, "never");
+      assert.equal(
+        thread.config["sandbox_workspace_write.network_access"],
+        false,
+      );
+      assert.equal(thread.config["mcp_servers.external.enabled"], false);
+      assert.deepEqual(thread.config.plugins, { external: { enabled: false } });
+      const gitDir = path.resolve(
+        f.cwd,
+        await git(f.cwd, ["rev-parse", "--git-dir"]),
+      );
+      const common = path.resolve(
+        f.cwd,
+        await git(f.cwd, ["rev-parse", "--git-common-dir"]),
+      );
+      assert.deepEqual(policy, {
+        type: "workspaceWrite",
+        writableRoots: [f.cwd, gitDir, path.join(f.dir, ".npm")],
+        networkAccess: false,
+        excludeTmpdirEnvVar: true,
+        excludeSlashTmp: true,
+      });
+      assert.deepEqual(
+        thread.config["sandbox_workspace_write.writable_roots"],
+        policy.writableRoots,
+      );
+      for (const protectedPath of [
+        "refs/heads/main",
+        "refs/codexbridge/integration/main",
+        "packed-refs",
+        "config",
+        "objects",
+      ]) {
+        assert.ok(
+          policy.writableRoots.every(
+            (root: string) => !inside(root, path.join(common, protectedPath)),
+          ),
+        );
+      }
+      await writeFile(path.join(f.cwd, "change.txt"), "isolated change");
+      assert.match(await git(f.cwd, ["status", "--short"]), /change.txt/);
+    } finally {
+      await f.close();
+    }
+  });
+test("ordinary worker declines approvals and returns a human decision", async () => {
+  const f = await fixture("approval", 10000, false);
+  try {
+    await assert.rejects(f.run, HumanRequired);
+    const messages = (await readFile(f.wire, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(messages.find((m) => m.id === 99).result, {
+      decision: "decline",
+    });
+    assert.ok(!f.events.includes("APPROVAL_GRANTED"));
+    assertCleaned(f.pids);
+  } finally {
+    await f.close();
+  }
+});

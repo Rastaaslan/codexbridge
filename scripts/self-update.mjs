@@ -117,6 +117,7 @@ export async function transaction(driver, ref) {
     previous = await driver.current();
     await save("building");
     candidate = await driver.build(ref);
+    await driver.validateRollback(previous, candidate);
     await save("prepared");
     await driver.quiesce();
     // Durable intent precedes the atomic switch, so an interrupted activation is recoverable.
@@ -237,6 +238,33 @@ export async function makeDriver(
       throw Error("Release must be directly inside releases directory");
     return resolved;
   };
+  async function compatibleRelease(release) {
+    await releasePath(release);
+    const policy = JSON.parse(
+      await readFile(
+        path.join(release, "deploy/debian/release-policy.json"),
+        "utf8",
+      ),
+    );
+    const manifest = JSON.parse(
+      await readFile(path.join(release, "release.json"), "utf8"),
+    );
+    const head = await git(release, ["rev-parse", "HEAD"]);
+    const committedPolicy = JSON.parse(
+      await git(release, ["show", `${head}:deploy/debian/release-policy.json`]),
+    );
+    if (
+      !/^[0-9a-f]{40,64}$/.test(head) ||
+      manifest.commit !== head ||
+      policy.runtimeSchema !== 1 ||
+      policy.sqliteSchema !== 4 ||
+      committedPolicy.runtimeSchema !== 1 ||
+      committedPolicy.sqliteSchema !== 4
+    )
+      throw Error(
+        "A verified schema-v4 rollback baseline is required; manual recovery plan required for migration",
+      );
+  }
   async function api(name) {
     const c = JSON.parse(
       await readFile(path.join(dataDir, "config.json"), "utf8"),
@@ -260,6 +288,10 @@ export async function makeDriver(
     save: (state) =>
       atomicJson(path.join(dataDir, "update-status.json"), state),
     current: () => realpath(current).then(releasePath),
+    async validateRollback(previous, candidate) {
+      await compatibleRelease(previous);
+      await compatibleRelease(candidate);
+    },
     async build(ref) {
       // Repository URL is chosen by the administrator, never by the MCP caller.
       const cache = path.join(root, "upstream.git");
@@ -301,14 +333,16 @@ export async function makeDriver(
           "utf8",
         ),
       );
-      if (manifest.runtimeSchema !== 1)
+      if (manifest.runtimeSchema !== 1 || manifest.sqliteSchema !== 4)
         throw Error("Incompatible runtime schema; manual migration required");
       // Build/test subprocesses receive no production secrets or runtime path.
       const scratch = path.join(candidate, ".validation");
       await mkdir(scratch);
       // tsx creates an IPC Unix socket below TMPDIR. Release paths can exceed
       // the AF_UNIX path limit, so keep only temporary IPC files in short /tmp.
-      const ipcTmp = await mkdtemp(path.join(tmpdir(), "codexbridge-validation-"));
+      const ipcTmp = await mkdtemp(
+        path.join(tmpdir(), "codexbridge-validation-"),
+      );
       const env = {
         PATH: process.env.PATH,
         HOME: scratch,
@@ -344,7 +378,13 @@ export async function makeDriver(
         throw Error("Active jobs; update refused. Wait or cancel explicitly.");
     },
     async activate(release) {
-      await releasePath(release);
+      await compatibleRelease(release);
+      // Also guard direct activation, before replacing the current symlink.
+      const previous = await realpath(current).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+        return null;
+      });
+      if (previous && previous !== release) await compatibleRelease(previous);
       const temp = current + ".next";
       await unlink(temp).catch((e) => {
         if (e.code !== "ENOENT") throw e;

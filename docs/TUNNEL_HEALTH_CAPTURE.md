@@ -11,6 +11,7 @@ Depuis Debian :
 Le script lance le runtime officiel avec le même contrat que la production, sans `cloudflared.managed`, puis lit l'URL de base écrite par `--health.url-file`.
 
 Il capture les trois routes officielles :
+
 - `/healthz` : liveness, 200 quand le processus est vivant ;
 - `/readyz` : readiness, 200 quand le tunnel est prêt, 503 tant qu'il reste gated ;
 - `/health?details=true` : diagnostic JSON des composants observés.

@@ -629,11 +629,38 @@ test("managed restart and failed candidate activation retain planner, admission,
     const candidate = path.join(root, "releases", "candidate");
     await mkdir(previous, { recursive: true });
     await mkdir(candidate);
+    for (const release of [previous, candidate]) {
+      await mkdir(path.join(release, "deploy/debian"), { recursive: true });
+      await writeFile(
+        path.join(release, "deploy/debian/release-policy.json"),
+        JSON.stringify({ runtimeSchema: 1, sqliteSchema: 4 }),
+      );
+      await git(release, ["init"]);
+      await git(release, ["add", "."]);
+      await git(release, [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "release",
+      ]);
+      await writeFile(
+        path.join(release, "release.json"),
+        JSON.stringify({ commit: await git(release, ["rev-parse", "HEAD"]) }),
+      );
+    }
     await symlink(previous, path.join(root, "current"));
-    const driver = await makeDriver(root, f.config.dataDir, {}, async () => ({
-      stdout: "",
-      stderr: "",
-    }));
+    const driver = await makeDriver(
+      root,
+      f.config.dataDir,
+      {},
+      async (command: string, args: string[], options: any) => ({
+        stdout: command === "git" ? await git(options.cwd, args) : "",
+        stderr: "",
+      }),
+    );
     await assert.rejects(
       () =>
         transaction(

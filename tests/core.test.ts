@@ -845,3 +845,51 @@ test("P1 restart recovery derives fan-in readiness from persisted dependency lif
     store.close();
   }
 });
+
+for (const direct of [false, true])
+  test(`cancellation during recovery is deterministic (${direct ? "store mutation" : "API action"})`, async () => {
+    const f = await fixture();
+    try {
+      const job = f.store.create(
+        createSchema.parse({
+          repository: f.repo,
+          title: "Recovery race",
+          ticket: "Test cancellation",
+        }),
+      );
+      f.store.transition(job.id, "PREPARING");
+      const plan = await f.core.git.plan(f.store.get(job.id));
+      f.store.patch(job.id, plan);
+      await f.core.git.prepare(f.store.get(job.id));
+      f.store.transition(job.id, "CODEX_RUNNING", { iteration: 1 });
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const inspecting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const diff = f.core.git.diff.bind(f.core.git);
+      f.core.git.diff = async (j) => {
+        entered();
+        await gate;
+        return diff(j);
+      };
+      const recovering = f.core.recover();
+      assert.equal(f.core.recover(), recovering);
+      await inspecting;
+      const cancelling = direct
+        ? Promise.resolve(f.store.transition(job.id, "CANCELLED"))
+        : f.core.action(job.id, "cancel");
+      await f.core.tick();
+      assert.equal(f.calls.length, 0);
+      release();
+      await Promise.all([recovering, cancelling]);
+      assert.equal(f.store.get(job.id).status, "CANCELLED");
+      assert.equal(f.store.get(job.id).retry.nextRetryAt, null);
+      if (direct) assert.equal(f.store.get(job.id).retry.count, 0);
+    } finally {
+      await f.cleanup();
+    }
+  });
