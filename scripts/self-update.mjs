@@ -6,6 +6,7 @@ import {
   readFile,
   mkdir,
   rename,
+  link,
   symlink,
   readlink,
   unlink,
@@ -47,6 +48,35 @@ export async function atomicJson(file, value) {
     } finally {
       await dir.close();
     }
+  }
+}
+// Publish only complete, synced bytes, with link's atomic no-replace semantics.
+// A crash can leave an unused temporary file, never a partial live marker.
+export async function publishMaintenance(
+  file,
+  marker,
+  io = { open, link, unlink },
+) {
+  const temp = `${file}.${randomUUID()}.tmp`;
+  try {
+    const handle = await io.open(temp, "wx", 0o600);
+    try {
+      await handle.writeFile(marker);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await io.link(temp, file);
+    const dir = await io.open(path.dirname(file), "r");
+    try {
+      await dir.sync();
+    } finally {
+      await dir.close();
+    }
+  } finally {
+    await io.unlink(temp).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
   }
 }
 export function safeError(error) {
@@ -221,6 +251,7 @@ export async function makeDriver(
   config,
   execute = exec,
   request = fetch,
+  maintenanceIO,
 ) {
   const releases = path.join(root, "releases");
   const maintenance = path.join(dataDir, "maintenance.json");
@@ -296,20 +327,8 @@ export async function makeDriver(
       id: randomUUID(),
     });
     try {
-      const handle = await open(maintenance, "wx", 0o600);
+      await publishMaintenance(maintenance, marker, maintenanceIO);
       ownedMaintenance = marker;
-      try {
-        await handle.writeFile(marker);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      const dir = await open(dataDir, "r");
-      try {
-        await dir.sync();
-      } finally {
-        await dir.close();
-      }
     } catch (error) {
       if (error.code !== "EEXIST" || !recovery) throw error;
       const existing = await readFile(maintenance, "utf8");

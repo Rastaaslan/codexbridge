@@ -53,6 +53,10 @@ Maintenance remains held until the restored service passes health checks.
 Preparation failure only releases maintenance acquired by that transaction;
 other operations' markers are preserved. Startup cleanup recognizes updater-owned
 markers, including the older single-field updater reason format.
+Maintenance acquisition publishes fully written, synced bytes with an atomic
+no-replace hard link, then syncs the directory. A crash before publication may
+leave an unused temporary file, but cannot expose a partial live marker or
+overwrite another operation's marker.
 
 This is a fail-closed migration policy, **not a v4-to-v1 rollback implementation**.
 Cross-version rollout remains blocked until a separate migration/recovery

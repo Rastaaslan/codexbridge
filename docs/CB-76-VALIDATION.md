@@ -6,6 +6,9 @@ no push, deployment, merge or service restart was performed.
 
 ## Resolved CB-71 findings
 
+The [original CB-71 findings and evidence map](CB-71-FINDINGS.md) retain excerpts
+from all three reviewer reports and identify each fix or remaining limitation.
+
 - Release manifests now include `sqliteSchema: 4`; activation and preflight reject
   missing or contradictory runtime/SQLite metadata.
 - Recovery validates the restoration target without requiring a damaged outgoing
@@ -16,7 +19,7 @@ no push, deployment, merge or service restart was performed.
   activation and transaction rejection, damaged-release restoration, and maintenance
   ownership. Existing recovery fixtures use the separate restoration interface.
 
-## Validation results
+## Iteration 1 validation results
 
 - `npm ci`: succeeded; dependency audit reported zero vulnerabilities.
 - `TMPDIR="$PWD/.test-tmp" npm run check`: TypeScript compilation succeeded;
@@ -32,6 +35,40 @@ no push, deployment, merge or service restart was performed.
   `app-server socket directory must be a user-owned directory with mode 0700`.
   Live hardened-worker edits, test execution and same-thread resume therefore
   remain unverified. No sandbox permissions were relaxed to bypass this failure.
+
+## Review follow-up validation
+
+The review identified a crash window while writing `maintenance.json`. Acquisition
+now writes a unique temporary file, syncs and closes it, then publishes it with an
+atomic hard link that refuses to overwrite an existing marker. The directory is
+synced before acquisition returns. Interrupted writes leave only an unused
+temporary file; after publication the live marker always contains complete JSON.
+Ordinary failure paths clean up temporary files. Recovery does not need to read
+or remove temporary files left by a crashed process.
+
+Fault-injection tests terminate a child process after a partial write, before
+publication and immediately after publication; they also inject write and
+directory-sync errors. Fresh driver instances perform startup cleanup, boot
+restoration and post-start health verification. Concurrent acquisitions prove
+exactly one publisher succeeds and the winner's bytes are preserved.
+
+- `TMPDIR="$PWD/.test-tmp" npx tsx --test tests/update.test.ts`: **27 passed**.
+- `TMPDIR="$PWD/.test-tmp" npm run check`: compilation and **150 tests passed**,
+  with zero failures, cancellations or skips; includes the final fresh-driver
+  adoption assertions and the preserved CB-75 regression coverage.
+- `npm run format:check`, `npm run audit:publication`, `git diff --check`: passed.
+- `codex sandbox linux --help`: again exited **1** with
+  `app-server socket directory must be a user-owned directory with mode 0700`.
+- `TMPDIR="$PWD/.test-tmp" npx tsx .test-tmp/live-adapter-probe.ts`: exited **1**
+  with `Codex app-server exited (1)`. The probe called the actual
+  `AppServerAdapter.run` using a worktree-local test state directory, a 10-second
+  timeout and the linked worktree as cwd. No thread-start callback occurred;
+  therefore edits, tests and resume could not be exercised. The local probe and
+  output are retained under ignored `.test-tmp/`; this paragraph records the
+  outcome in version control without private runtime state.
+
+No host socket configuration, production state or sandbox permissions were changed.
+These failures are environmental validation blockers, not passing live evidence.
 
 ## Remaining release gates
 

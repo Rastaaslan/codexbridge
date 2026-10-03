@@ -594,3 +594,128 @@ test("preparation rejection, occupied maintenance and startup cleanup preserve a
     await rm(f.dir, { recursive: true, force: true });
   }
 });
+
+for (const fault of [
+  "write-failure",
+  "partial-write",
+  "before-link",
+  "after-link",
+  "directory-sync",
+]) {
+  test(`maintenance acquisition survives ${fault} with a fresh recovery driver`, async () => {
+    const f = await compatibilityFixture();
+    const { rm, readdir } = await import("node:fs/promises");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const { makeDriver } = await import("../scripts/self-update.mjs");
+    // Exit the child during publication so finally blocks cannot mask crash behavior.
+    const script = `
+      import * as fs from 'node:fs/promises';
+      import { makeDriver } from ${JSON.stringify(new URL("../scripts/self-update.mjs", import.meta.url).href)};
+      const fault = ${JSON.stringify(fault)};
+      const io = {
+        ...fs,
+        async open(file, flags, mode) {
+          const h = await fs.open(file, flags, mode);
+          return {
+            async writeFile(bytes) {
+              await h.writeFile(bytes.slice(0, 10));
+              if (fault === 'partial-write') process.exit(73);
+              if (fault === 'write-failure') throw Error('injected write failure');
+              await h.writeFile(bytes.slice(10));
+            },
+            async sync() {
+              if (flags === 'r' && fault === 'directory-sync') throw Error('injected directory sync failure');
+              await h.sync();
+            },
+            close: () => h.close(),
+          };
+        },
+        async link(from, to) {
+          if (fault === 'before-link') process.exit(73);
+          await fs.link(from, to);
+          if (fault === 'after-link') process.exit(73);
+        },
+      };
+      const driver = await makeDriver(${JSON.stringify(f.root)}, ${JSON.stringify(f.data)}, {}, undefined,
+        async () => Response.json({ counts: { running: 0 } }), io);
+      try { await driver.quiesce(); process.exit(74); }
+      catch (e) {
+        if (!e.message.startsWith('injected')) throw e;
+        process.exit(73);
+      }
+    `;
+    try {
+      await assert.rejects(
+        promisify(execFile)(process.execPath, [
+          "--input-type=module",
+          "-e",
+          script,
+        ]),
+        (error: any) => error.code === 73,
+      );
+      const published = fault === "after-link" || fault === "directory-sync";
+      if (published) {
+        const marker = JSON.parse(await readFile(f.maintenance, "utf8"));
+        assert.equal(marker.owner, "codexbridge-update");
+        assert.equal(marker.reason, "self-update");
+        assert.ok(marker.id);
+      } else await assert.rejects(readFile(f.maintenance), { code: "ENOENT" });
+      if (fault === "write-failure" || fault === "directory-sync")
+        assert.equal(
+          (await readdir(f.data)).some((name) => name.endsWith(".tmp")),
+          false,
+        );
+      // Fresh startup cleans unpublished acquisitions; boot recovery adopts any
+      // complete marker left by a crash without relying on in-memory ownership.
+      const fresh = () => makeDriver(f.root, f.data, {});
+      if (!published) {
+        await recover(await fresh(), { phase: "prepared" });
+        await assert.rejects(readFile(f.maintenance), { code: "ENOENT" });
+      }
+      await recover(
+        await fresh(),
+        { phase: "activating", previous: f.old },
+        true,
+      );
+      assert.equal(
+        JSON.parse(await readFile(f.maintenance, "utf8")).reason,
+        published ? "self-update" : "recovery awaiting health",
+      );
+      const verifier = await fresh();
+      verifier.health = async () => ({ orchestratorOk: true });
+      await verifyRecovery(verifier, {
+        phase: "boot_pending_health",
+        previous: f.old,
+      });
+      await assert.rejects(readFile(f.maintenance), { code: "ENOENT" });
+      assert.equal(await realpath(f.current), f.old);
+    } finally {
+      await rm(f.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("concurrent maintenance publication has exactly one owner and never replaces bytes", async () => {
+  const { publishMaintenance } = await import("../scripts/self-update.mjs");
+  const { rm, readdir } = await import("node:fs/promises");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cb-marker-"));
+  const file = path.join(dir, "maintenance.json");
+  const markers = Array.from({ length: 8 }, (_, id) => JSON.stringify({ id }));
+  try {
+    const results = await Promise.allSettled(
+      markers.map((marker) => publishMaintenance(file, marker)),
+    );
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+    for (const result of results)
+      if (result.status === "rejected")
+        assert.equal(result.reason.code, "EEXIST");
+    assert.equal(
+      await readFile(file, "utf8"),
+      markers[results.findIndex((r) => r.status === "fulfilled")],
+    );
+    assert.deepEqual(await readdir(dir), ["maintenance.json"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
