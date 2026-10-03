@@ -16,6 +16,7 @@ import { z } from "zod";
 import { AppServerAdapter } from "../src/codex.js";
 import { configSchema } from "../src/config.js";
 import { git, inside } from "../src/git.js";
+import { createLiveCodexLauncher } from "./live-codex-launcher.js";
 
 // No service, production configuration, reviewer, or external MCP connection.
 // CODEX_HOME is scoped to the child runtime by the launcher below.
@@ -45,6 +46,11 @@ const report: Record<string, any> = {
     .digest("hex"),
   harnessSha256: createHash("sha256")
     .update(await readFile(fileURLToPath(import.meta.url)))
+    .digest("hex"),
+  launcherSourceSha256: createHash("sha256")
+    .update(
+      await readFile(new URL("./live-codex-launcher.ts", import.meta.url)),
+    )
     .digest("hex"),
   startedAt: new Date().toISOString(),
   status: "blocked",
@@ -80,19 +86,7 @@ try {
     worktree,
     baseline,
   ]);
-  const launcher = path.join(dir, "codex-launcher");
-  await writeFile(
-    launcher,
-    `#!/usr/bin/env node
-const { spawn } = require('node:child_process');
-const child = spawn('codex', process.argv.slice(2), {
-  env: { ...process.env, CODEX_HOME: ${JSON.stringify(sessionHome)} }, stdio: 'inherit'
-});
-child.on('error', () => process.exit(1));
-child.on('exit', code => process.exit(code ?? 1));
-`,
-    { mode: 0o700 },
-  );
+  const launcher = await createLiveCodexLauncher(dir, sessionHome);
   const config = configSchema.parse({
     dataDir: path.join(dir, "state"),
     repositoryRoots: [repo],

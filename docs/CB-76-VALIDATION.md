@@ -106,7 +106,7 @@ relaxed by the harness. These settings remain covered by adapter protocol tests;
 the live harness additionally probes filesystem enforcement.
 
 Each attempt retains `report.json` under `.test-tmp/live-hardened-*`, including
-the checkout commit, tracked changes, adapter and harness SHA-256 hashes, thread
+the checkout commit, tracked changes, adapter, harness and launcher-source SHA-256 hashes, thread
 IDs, completed commands, independent test output, assertions' failures and final
 status. Reports remain local because runtime output may contain private paths.
 For release evidence, run from the committed, clean checkout and require
@@ -114,10 +114,12 @@ For release evidence, run from the committed, clean checkout and require
 
 Iteration 3 attempted the command with `.test-tmp/live-test-codex-home`, an isolated
 empty test home. It exited **1**, `Codex app-server exited (1)`, before the first
-thread callback. The runtime's `codex sandbox linux --help` also exited **1** with
-the same socket-directory error reported above. This is failed live validation,
-not successful edit/test/resume evidence; authentication in the isolated home is
-also still required once the runtime can start.
+thread callback. Review reproduced the actual harness defect: its extensionless
+launcher used `require` inside this ESM package, causing
+`ReferenceError: require is not defined in ES module scope` before Codex started.
+The separate `codex sandbox linux --help` probe exited **1** with the socket-directory
+error reported above; that error did not establish the cause of the harness failure.
+The iteration 3 harness report is therefore launcher-failure evidence only.
 
 Iteration 3 automated validation: `TMPDIR="$PWD/.test-tmp" npm run check`
 passed compilation and all **150 tests**, with zero failures or skips.
@@ -126,9 +128,38 @@ passed standalone harness typechecking. Formatting, publication audit and diff
 checks passed. The audit initially flagged a dummy token literal in the harness;
 the final explicit generated test placeholder passes the audit.
 
-Run the live worker/edit/test/resume validation in an isolated environment with a
-working Codex sandbox and writable test-only session storage. This worktree cannot
-repair the host socket configuration while preserving production unchanged.
+### Launcher correction and current live blocker
+
+The launcher is now generated as `codex-launcher.cjs` by the shared
+`createLiveCodexLauncher` helper. A credential-free smoke test executes that exact
+helper's output inside a `type: module` package with a stub Codex executable. It
+verifies executable startup, literal argument forwarding (including spaces and
+shell metacharacters), the isolated child `CODEX_HOME`, unchanged parent storage,
+stdout/stderr forwarding and nonzero exit-status propagation. This test validates
+the launcher only; its stub is never substituted into the live harness.
+
+Iteration 4 validation results:
+
+- `TMPDIR="$PWD/.test-tmp" npx tsx --test tests/live-codex-launcher.test.ts`:
+  **1 passed**, zero skips.
+- `TMPDIR="$PWD/.test-tmp" npm run check`: compilation and **151 tests passed**,
+  zero failures, cancellations or skips.
+- `npx tsc --noEmit --module NodeNext --target ES2023 --strict --skipLibCheck scripts/live-hardened-worker.ts scripts/live-codex-launcher.ts tests/live-codex-launcher.test.ts`:
+  passed.
+- `npm run format:check`, `npm run audit:publication`, `git diff --check`: passed.
+
+The corrected live harness was rerun using `.test-tmp/live-test-codex-home`.
+Codex now starts and creates a thread, but the model request fails with **401
+Unauthorized: Missing bearer or basic authentication in header**. No worker command
+executes. Executing the generated `.cjs` launcher with `--help` also succeeds.
+The current demonstrated blocker is missing authentication in the test-only home,
+not the fixed launcher defect or a proven sandbox-startup failure. Filesystem
+sandbox enforcement remains unverified until the worker actually executes commands.
+
+Authenticate that test-only home (or supply another authenticated home under this
+worktree's `.test-tmp/`) and rerun the documented command from the committed, clean
+checkout. Successful worker edits, test execution and same-thread resume are still
+required. No production credentials were copied or production settings changed.
 
 Schema-v4 gating is a fail-closed policy, not cross-version rollback. Cross-version
 rollout remains blocked pending a separately validated migration/recovery procedure;
