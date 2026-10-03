@@ -1,9 +1,9 @@
 // This runner is installed root-owned, but always executes as codexbridge, never root.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { randomUUID } from "node:crypto";
 import {
   readFile,
-  writeFile,
   mkdir,
   rename,
   symlink,
@@ -103,7 +103,8 @@ export async function transaction(driver, ref) {
   validateRef(ref);
   let previous,
     candidate,
-    activating = false;
+    activating = false,
+    quiescing = false;
   const save = (phase, extra = {}) =>
     driver.save({
       phase,
@@ -119,6 +120,7 @@ export async function transaction(driver, ref) {
     candidate = await driver.build(ref);
     await driver.validateRollback(previous, candidate);
     await save("prepared");
+    quiescing = true;
     await driver.quiesce();
     // Durable intent precedes the atomic switch, so an interrupted activation is recoverable.
     await save("activating");
@@ -132,7 +134,7 @@ export async function transaction(driver, ref) {
   } catch (error) {
     if (activating) {
       try {
-        await driver.activate(previous);
+        await driver.restore(previous);
         await driver.restart();
         const health = await driver.health(previous);
         await save("rolled_back", {
@@ -154,7 +156,7 @@ export async function transaction(driver, ref) {
         reason:
           "Preparation failed; active release unchanged: " + safeError(error),
       });
-      await driver.resume();
+      if (quiescing) await driver.resume();
     }
     throw error;
   }
@@ -192,7 +194,7 @@ export async function recover(driver, state, boot = false) {
     // The boot unit must finish before the server can start. Keep scheduling
     // blocked until the separate post-start unit validates the restored release.
     await driver.hold();
-    await driver.activate(state.previous);
+    await driver.restore(state.previous);
     const pending = {
       ...state,
       phase: "boot_pending_health",
@@ -211,7 +213,7 @@ export async function recover(driver, state, boot = false) {
       reason: "Interrupted preparation; active release unchanged.",
     });
   }
-  await driver.resume();
+  await driver.resume(true);
 }
 export async function makeDriver(
   root,
@@ -256,6 +258,8 @@ export async function makeDriver(
     if (
       !/^[0-9a-f]{40,64}$/.test(head) ||
       manifest.commit !== head ||
+      manifest.runtimeSchema !== 1 ||
+      manifest.sqliteSchema !== 4 ||
       policy.runtimeSchema !== 1 ||
       policy.sqliteSchema !== 4 ||
       committedPolicy.runtimeSchema !== 1 ||
@@ -264,6 +268,55 @@ export async function makeDriver(
       throw Error(
         "A verified schema-v4 rollback baseline is required; manual recovery plan required for migration",
       );
+  }
+  async function switchCurrent(release) {
+    const temp = current + ".next";
+    await unlink(temp).catch((e) => {
+      if (e.code !== "ENOENT") throw e;
+    });
+    await symlink(release, temp, "dir");
+    await rename(temp, current);
+    const dir = await open(root, "r");
+    try {
+      await dir.sync();
+    } finally {
+      await dir.close();
+    }
+  }
+  let ownedMaintenance;
+  const updateMarker = (marker) =>
+    (marker?.owner === "codexbridge-update" ||
+      (marker && Object.keys(marker).length === 1)) &&
+    (marker.reason === "self-update" ||
+      marker.reason === "recovery awaiting health");
+  async function acquireMaintenance(reason, recovery = false) {
+    const marker = JSON.stringify({
+      reason,
+      owner: "codexbridge-update",
+      id: randomUUID(),
+    });
+    try {
+      const handle = await open(maintenance, "wx", 0o600);
+      ownedMaintenance = marker;
+      try {
+        await handle.writeFile(marker);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      const dir = await open(dataDir, "r");
+      try {
+        await dir.sync();
+      } finally {
+        await dir.close();
+      }
+    } catch (error) {
+      if (error.code !== "EEXIST" || !recovery) throw error;
+      const existing = await readFile(maintenance, "utf8");
+      if (!updateMarker(JSON.parse(existing)))
+        throw Error("Maintenance belongs to another operation");
+      ownedMaintenance = existing;
+    }
   }
   async function api(name) {
     const c = JSON.parse(
@@ -364,15 +417,16 @@ export async function makeDriver(
         await atomicJson(path.join(candidate, "release.json"), {
           commit,
           runtimeSchema: 1,
+          sqliteSchema: 4,
         });
         return candidate;
       } finally {
         await rm(ipcTmp, { recursive: true, force: true });
       }
     },
-    hold: () => atomicJson(maintenance, { reason: "recovery awaiting health" }),
+    hold: () => acquireMaintenance("recovery awaiting health", true),
     async quiesce() {
-      await atomicJson(maintenance, { reason: "self-update" });
+      await acquireMaintenance("self-update");
       const status = await api("jobs_overview");
       if (status.counts.running > 0)
         throw Error("Active jobs; update refused. Wait or cancel explicitly.");
@@ -385,18 +439,12 @@ export async function makeDriver(
         return null;
       });
       if (previous && previous !== release) await compatibleRelease(previous);
-      const temp = current + ".next";
-      await unlink(temp).catch((e) => {
-        if (e.code !== "ENOENT") throw e;
-      });
-      await symlink(release, temp, "dir");
-      await rename(temp, current);
-      const dir = await open(root, "r");
-      try {
-        await dir.sync();
-      } finally {
-        await dir.close();
-      }
+      await switchCurrent(release);
+    },
+    async restore(release) {
+      // Recovery trusts only the restoration target, never a damaged outgoing release.
+      await compatibleRelease(release);
+      await switchCurrent(release);
     },
     restart: () =>
       run(
@@ -427,10 +475,20 @@ export async function makeDriver(
       } while (Date.now() < deadline);
       throw Error("Release health deadline exceeded");
     },
-    resume: () =>
-      unlink(maintenance).catch((e) => {
-        if (e.code !== "ENOENT") throw e;
-      }),
+    async resume(recovery = false) {
+      try {
+        const existing = await readFile(maintenance, "utf8");
+        if (
+          existing === ownedMaintenance ||
+          (recovery && updateMarker(JSON.parse(existing)))
+        ) {
+          await unlink(maintenance);
+          ownedMaintenance = undefined;
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    },
   };
 }
 async function main() {

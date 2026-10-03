@@ -579,7 +579,7 @@ for (const phase of ["activating", "rollback_failed"]) {
       const queued = await f.core.create(ticket(f.repo));
       const driver = {
         hold: () => writeFile(maintenanceFile(f.config.dataDir), "{}"),
-        activate: async (release: string) => {
+        restore: async (release: string) => {
           assert.equal(release, "old");
         },
         save: async (next: any) => {

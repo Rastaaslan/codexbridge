@@ -34,3 +34,29 @@ La supervision Linux accorde 60 secondes de démarrage, puis vérifie la santé 
 Tests locaux : `npm run build`, `npm test`, `npm run audit:publication`. Sous la sandbox Windows : créer `.test-tmp`, définir `TEMP` et `TMP` sur son chemin absolu et utiliser `npm.cmd`. Tests réels Git/SQLite/HTTP/MCP/reprise ; contrôles statiques systemd/sudoers ; simulation des défaillances de transaction. Aucun test root/systemd ou tunnel distant n'a été exécuté sur Windows.
 
 Après une restauration au boot, l'état `boot_pending_health` conserve la maintenance : aucun job ne démarre. L'unité `codexbridge-recovery-health.service`, ordonnée après l'orchestrateur et le tunnel, vérifie la release restaurée. Seul un contrôle réussi autorise la reprise. En cas d'échec, `rollback_failed` conserve la maintenance ; après correction, l'administrateur peut relancer cette unité de contrôle. Un nouveau reboot ne contourne pas cette vérification.
+
+### Schema-v4 activation and restoration
+
+The updater requires `release.json` to declare `runtimeSchema: 1`,
+`sqliteSchema: 4`, and the exact checked-out Git commit. Both the on-disk and
+committed `deploy/debian/release-policy.json` must declare those same schema
+versions. Missing or contradictory metadata is rejected, including manifests
+produced by earlier runners that omitted `sqliteSchema`. Do not fabricate a
+rollback baseline by editing its metadata: provision and validate a compatible
+release through a separately reviewed migration procedure.
+
+Forward activation validates both the candidate and the installed rollback
+baseline before switching `current`. Transaction validation precedes maintenance
+acquisition. Rollback and boot restoration validate the restoration target only,
+so a damaged outgoing manifest cannot prevent restoring a valid baseline.
+Maintenance remains held until the restored service passes health checks.
+Preparation failure only releases maintenance acquired by that transaction;
+other operations' markers are preserved. Startup cleanup recognizes updater-owned
+markers, including the older single-field updater reason format.
+
+This is a fail-closed migration policy, **not a v4-to-v1 rollback implementation**.
+Cross-version rollout remains blocked until a separate migration/recovery
+procedure has been validated. Worker edit/test compatibility also requires live
+sandbox validation: protocol tests alone do not prove execution with network and
+shared Git writes disabled. Native tunnel availability must be checked separately
+from mocked tunnel contract tests.

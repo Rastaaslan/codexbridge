@@ -160,6 +160,8 @@ export async function releasePreflight(
       !currentRelease ||
       release.commit !== currentRelease ||
       !/^[0-9a-f]{40,64}$/.test(release.commit) ||
+      release.runtimeSchema !== 1 ||
+      release.sqliteSchema !== 4 ||
       policy.runtimeSchema !== 1 ||
       policy.sqliteSchema !== 4
     )

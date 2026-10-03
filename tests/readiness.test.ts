@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Store } from "../src/database.js";
@@ -63,7 +63,7 @@ test("preflight fails closed with concrete blockers and preserves strict read-on
     const commit = (await git(f.dir, ["rev-parse", "HEAD"])).trim();
     await writeFile(
       path.join(f.dir, "release.json"),
-      JSON.stringify({ commit }),
+      JSON.stringify({ commit, runtimeSchema: 1, sqliteSchema: 4 }),
     );
     const health = async () => ({
       ok: true,
@@ -81,6 +81,37 @@ test("preflight fails closed with concrete blockers and preserves strict read-on
     assert.equal(ready.ready, true);
     assert.equal(ready.currentRelease, commit);
     assert.equal(ready.candidateCommit, commit);
+    // The baseline manifest must satisfy the same schema contract as activation.
+    for (const metadata of [
+      {},
+      { runtimeSchema: 1 },
+      { sqliteSchema: 4 },
+      { runtimeSchema: 99, sqliteSchema: 1 },
+      { runtimeSchema: 99, sqliteSchema: 4 },
+      { runtimeSchema: 1, sqliteSchema: 1 },
+      { runtimeSchema: "1", sqliteSchema: 4 },
+      { runtimeSchema: 1, sqliteSchema: "4" },
+    ]) {
+      const manifest = JSON.stringify({ commit, ...metadata });
+      await writeFile(path.join(f.dir, "release.json"), manifest);
+      const rejected = await releasePreflight(f.core, "HEAD", options);
+      assert.equal(rejected.ready, false, manifest);
+      assert.deepEqual(
+        rejected.blockers.map((b) => b.code),
+        ["PREVIOUS_RELEASE"],
+        manifest,
+      );
+      assert.equal(
+        await readFile(path.join(f.dir, "release.json"), "utf8"),
+        manifest,
+      );
+      assert.equal(await git(f.dir, ["status", "--porcelain"]), "");
+    }
+    await writeFile(
+      path.join(f.dir, "release.json"),
+      JSON.stringify({ commit, runtimeSchema: 1, sqliteSchema: 4 }),
+    );
+    assert.equal((await releasePreflight(f.core, "HEAD", options)).ready, true);
     // A replacement must not let an incompatible commit borrow HEAD's policy.
     await writeFile(
       path.join(f.dir, "deploy/debian/release-policy.json"),

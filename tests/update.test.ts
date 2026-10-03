@@ -68,8 +68,9 @@ function fixture(fail = "") {
       events.push("resume");
     },
   };
+  const recoveryDriver = { ...driver, restore: driver.activate };
   return {
-    driver,
+    driver: recoveryDriver,
     events,
     get current() {
       return current;
@@ -258,6 +259,10 @@ test("real fetch pins the requested tag and validates isolated candidate before 
     commit,
   );
   assert.deepEqual(
+    JSON.parse(await readFile(path.join(candidate, "release.json"), "utf8")),
+    { commit, runtimeSchema: 1, sqliteSchema: 4 },
+  );
+  assert.deepEqual(
     validation.map((a) => a.slice(0, 2)),
     [["ci", "--ignore-scripts"], ["run", "build"], ["test"]],
   );
@@ -288,6 +293,8 @@ test("real fetch pins the requested tag and validates isolated candidate before 
     path.join(previous, "release.json"),
     JSON.stringify({
       commit: (await previousGit(["rev-parse", "HEAD"])).stdout.trim(),
+      runtimeSchema: 1,
+      sqliteSchema: 4,
     }),
   );
   await symlink(previous, path.join(root, "current"));
@@ -324,4 +331,266 @@ test("real fetch pins the requested tag and validates isolated candidate before 
   );
   await assert.rejects(() => driver.build("not-a-real-ref"));
   assert.equal(validation.length, 3);
+});
+
+// Real Git policies and real filesystem activation; only service operations are stubbed.
+async function compatibilityFixture() {
+  const { makeDriver } = await import("../scripts/self-update.mjs");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execute = promisify(execFile);
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cb-compat-"));
+  const root = path.join(dir, "installation"),
+    data = path.join(dir, "data");
+  await mkdir(data);
+  const policy = { runtimeSchema: 1, sqliteSchema: 4 };
+  const git = async (cwd: string, args: string[]) =>
+    (
+      await execute(
+        "git",
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.invalid",
+          ...args,
+        ],
+        { cwd },
+      )
+    ).stdout.trim();
+  const manifest = async (release: string, fields = policy) =>
+    writeFile(
+      path.join(release, "release.json"),
+      JSON.stringify({
+        commit: await git(release, ["rev-parse", "HEAD"]),
+        ...fields,
+      }),
+    );
+  const commitPolicy = async (release: string, fields: object) => {
+    await writeFile(
+      path.join(release, "deploy/debian/release-policy.json"),
+      JSON.stringify(fields),
+    );
+    await git(release, ["add", "deploy/debian/release-policy.json"]);
+    await git(release, ["commit", "--allow-empty", "-m", "fixture policy"]);
+    await manifest(release);
+  };
+  const old = path.join(root, "releases", "old"),
+    candidate = path.join(root, "releases", "candidate");
+  for (const release of [old, candidate]) {
+    await mkdir(path.join(release, "deploy/debian"), { recursive: true });
+    await git(release, ["init"]);
+    await commitPolicy(release, policy);
+  }
+  const current = path.join(root, "current"),
+    maintenance = path.join(data, "maintenance.json");
+  await symlink(old, current);
+  await writeFile(path.join(data, "codexbridge.db"), "untouched database");
+  await writeFile(
+    path.join(data, "config.json"),
+    JSON.stringify({ token: "fixture" }),
+  );
+  const driver = await makeDriver(root, data, {}, undefined, async () =>
+    Response.json({ counts: { running: 0 } }),
+  );
+  driver.build = async () => candidate;
+  driver.restart = async () => {};
+  driver.health = async () => ({ orchestratorOk: true });
+  return {
+    dir,
+    root,
+    data,
+    old,
+    candidate,
+    current,
+    maintenance,
+    driver,
+    policy,
+    git,
+    manifest,
+    commitPolicy,
+  };
+}
+
+test("v4 compatibility rejects every metadata mismatch on either side before activation", async () => {
+  const f = await compatibilityFixture();
+  const { rm, access } = await import("node:fs/promises");
+  let quiesces = 0,
+    activations = 0;
+  const quiesce = f.driver.quiesce,
+    activate = f.driver.activate;
+  f.driver.quiesce = async () => {
+    quiesces++;
+    await quiesce();
+  };
+  f.driver.activate = async (release: string) => {
+    activations++;
+    await activate(release);
+  };
+  try {
+    for (const release of [f.old, f.candidate]) {
+      for (const source of ["manifest", "policy", "committedPolicy"]) {
+        for (const fields of [
+          { runtimeSchema: 99, sqliteSchema: 4 },
+          { runtimeSchema: 1, sqliteSchema: 1 },
+          { runtimeSchema: 1 },
+          { sqliteSchema: 4 },
+          { runtimeSchema: 1, sqliteSchema: "4" },
+          { runtimeSchema: "1", sqliteSchema: 4 },
+        ]) {
+          const policyFile = path.join(
+            release,
+            "deploy/debian/release-policy.json",
+          );
+          if (source === "manifest")
+            await writeFile(
+              path.join(release, "release.json"),
+              JSON.stringify({
+                commit: await f.git(release, ["rev-parse", "HEAD"]),
+                ...fields,
+              }),
+            );
+          else {
+            if (source === "committedPolicy")
+              await f.commitPolicy(release, fields);
+            await writeFile(
+              policyFile,
+              JSON.stringify(source === "committedPolicy" ? f.policy : fields),
+            );
+          }
+          await assert.rejects(
+            f.driver.validateRollback(f.old, f.candidate),
+            /schema-v4/,
+          );
+          await assert.rejects(f.driver.activate(f.candidate), /schema-v4/);
+          const before = activations;
+          await assert.rejects(transaction(f.driver, "main"), /schema-v4/);
+          assert.equal(quiesces, 0);
+          assert.equal(activations, before);
+          assert.equal(await realpath(f.current), f.old);
+          await assert.rejects(access(f.current + ".next"));
+          await assert.rejects(access(f.maintenance));
+          await f.commitPolicy(release, f.policy);
+        }
+      }
+      await writeFile(
+        path.join(release, "release.json"),
+        JSON.stringify({ commit: "0".repeat(40), ...f.policy }),
+      );
+      await assert.rejects(
+        f.driver.validateRollback(f.old, f.candidate),
+        /schema-v4/,
+      );
+      await assert.rejects(f.driver.activate(f.candidate), /schema-v4/);
+      await f.manifest(release);
+      await f.git(release, ["commit", "--allow-empty", "-m", "HEAD drift"]);
+      await assert.rejects(
+        f.driver.validateRollback(f.old, f.candidate),
+        /schema-v4/,
+      );
+      await f.manifest(release);
+    }
+    assert.equal((await transaction(f.driver, "main")).phase, "completed");
+    assert.equal(await realpath(f.current), f.candidate);
+    assert.equal(
+      await readFile(path.join(f.data, "codexbridge.db"), "utf8"),
+      "untouched database",
+    );
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+for (const boot of [false, true])
+  test(`damaged outgoing manifest does not prevent validated v4 restoration (boot=${boot})`, async () => {
+    const f = await compatibilityFixture();
+    const { rm, access } = await import("node:fs/promises");
+    try {
+      if (boot) {
+        await f.driver.activate(f.candidate);
+        await writeFile(path.join(f.candidate, "release.json"), "corrupt");
+        await recover(
+          f.driver,
+          { phase: "activating", previous: f.old, candidate: f.candidate },
+          true,
+        );
+        assert.equal(
+          JSON.parse(
+            await readFile(path.join(f.data, "update-status.json"), "utf8"),
+          ).phase,
+          "boot_pending_health",
+        );
+        await access(f.maintenance);
+        await verifyRecovery(
+          f.driver,
+          JSON.parse(
+            await readFile(path.join(f.data, "update-status.json"), "utf8"),
+          ),
+        );
+      } else {
+        f.driver.health = async (release: string) => {
+          if (release === f.candidate) {
+            await writeFile(path.join(release, "release.json"), "corrupt");
+            throw Error("candidate unhealthy");
+          }
+          return { orchestratorOk: true };
+        };
+        await assert.rejects(
+          transaction(f.driver, "main"),
+          /candidate unhealthy/,
+        );
+      }
+      assert.equal(await realpath(f.current), f.old);
+      assert.equal(
+        JSON.parse(
+          await readFile(path.join(f.data, "update-status.json"), "utf8"),
+        ).phase,
+        "rolled_back",
+      );
+      await assert.rejects(access(f.maintenance));
+      await assert.rejects(f.driver.restore(f.candidate));
+      assert.equal(await realpath(f.current), f.old);
+      await writeFile(path.join(f.old, "release.json"), "corrupt target");
+      await assert.rejects(f.driver.restore(f.old));
+    } finally {
+      await rm(f.dir, { recursive: true, force: true });
+    }
+  });
+
+test("preparation rejection, occupied maintenance and startup cleanup preserve another operation's marker", async () => {
+  const f = await compatibilityFixture();
+  const { rm } = await import("node:fs/promises");
+  try {
+    const sentinel = JSON.stringify({
+      reason: "operator maintenance",
+      detail: "preserve bytes",
+    });
+    await writeFile(f.maintenance, sentinel);
+    await f.commitPolicy(f.old, { runtimeSchema: 1 });
+    await assert.rejects(transaction(f.driver, "main"), /schema-v4/);
+    assert.equal(await readFile(f.maintenance, "utf8"), sentinel);
+    await f.commitPolicy(f.old, f.policy);
+    await assert.rejects(transaction(f.driver, "main"), /EEXIST/);
+    assert.equal(await readFile(f.maintenance, "utf8"), sentinel);
+    await recover(f.driver, { phase: "prepared" });
+    await recover(f.driver, undefined);
+    assert.equal(await readFile(f.maintenance, "utf8"), sentinel);
+    await assert.rejects(
+      recover(f.driver, { phase: "activating", previous: f.old }, true),
+      /another operation/,
+    );
+    assert.equal(await readFile(f.maintenance, "utf8"), sentinel);
+    assert.equal(await realpath(f.current), f.old);
+    await writeFile(f.maintenance, JSON.stringify({ reason: "self-update" }));
+    await recover(f.driver, { phase: "prepared" });
+    await assert.rejects(readFile(f.maintenance), { code: "ENOENT" });
+    await f.driver.quiesce();
+    await writeFile(f.maintenance, sentinel);
+    await f.driver.resume();
+    assert.equal(await readFile(f.maintenance, "utf8"), sentinel);
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
 });

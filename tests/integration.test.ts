@@ -648,7 +648,11 @@ test("managed restart and failed candidate activation retain planner, admission,
       ]);
       await writeFile(
         path.join(release, "release.json"),
-        JSON.stringify({ commit: await git(release, ["rev-parse", "HEAD"]) }),
+        JSON.stringify({
+          commit: await git(release, ["rev-parse", "HEAD"]),
+          runtimeSchema: 1,
+          sqliteSchema: 4,
+        }),
       );
     }
     await symlink(previous, path.join(root, "current"));

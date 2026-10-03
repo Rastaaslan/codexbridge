@@ -143,6 +143,7 @@ test("real update health and boot recovery retain maintenance ordering with a de
     await access(path.join(data, "maintenance.json"));
     selected = value;
   };
+  driver.restore = driver.activate;
   driver.restart = async () => {
     await access(path.join(data, "maintenance.json"));
   };
@@ -205,6 +206,9 @@ test("application failure still rolls back and failed boot validation retains ma
       held = true;
     },
     activate: async (value: string) => {
+      selected = value;
+    },
+    restore: async (value: string) => {
       selected = value;
     },
     restart: async () => {},
