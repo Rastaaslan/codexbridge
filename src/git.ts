@@ -10,22 +10,67 @@ export async function git(
   args: string[],
   env: NodeJS.ProcessEnv = {},
 ) {
-  const { stdout } = await exec(
-    "git",
-    ["-c", "core.hooksPath=/dev/null", ...args],
-    {
-      cwd,
-      windowsHide: true,
-      timeout: 30000,
-      maxBuffer: 8 * 1024 * 1024,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: "0",
-        GIT_OPTIONAL_LOCKS: "0",
-        ...env,
-      },
+  // Reject per-worktree config before invoking Git: command-line extension
+  // overrides do not prevent Git from reading config.worktree during setup.
+  // Legacy workers could write this file, including includes and redirections.
+  let metadata = path.join(cwd, ".git");
+  try {
+    if ((await lstat(metadata)).isFile()) {
+      const pointer = await readFile(metadata, "utf8");
+      if (!pointer.startsWith("gitdir: ")) throw Error("Invalid Git pointer");
+      metadata = path.resolve(cwd, pointer.slice(8).trim());
+    }
+    try {
+      await lstat(path.join(metadata, "config.worktree"));
+      throw Error(
+        "Per-worktree Git configuration is unsupported; operator inspection required",
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const policy = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+  ];
+  const options = {
+    cwd,
+    windowsHide: true,
+    timeout: 30000,
+    maxBuffer: 8 * 1024 * 1024,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_OPTIONAL_LOCKS: "0",
+      ...env,
     },
-  );
+  };
+  // Attributes are worker-controlled too: even a driver defined in trusted
+  // config must not become a callback from add/status/checkout in the service.
+  const filters = await exec(
+    "git",
+    [
+      ...policy,
+      "config",
+      "--null",
+      "--name-only",
+      "--get-regexp",
+      "^filter\\..*\\.(clean|smudge|process|required)$",
+    ],
+    options,
+  ).catch((error) => {
+    if (error.code === 1 && !error.stdout && !error.stderr)
+      return { stdout: "" };
+    throw error;
+  });
+  for (const key of filters.stdout.split("\0").filter(Boolean)) {
+    policy.push("-c", `${key}=${key.endsWith(".required") ? "false" : ""}`);
+  }
+  const { stdout } = await exec("git", [...policy, ...args], options);
   return stdout.trimEnd();
 }
 export function inside(root: string, target: string) {

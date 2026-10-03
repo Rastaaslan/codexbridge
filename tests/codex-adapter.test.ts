@@ -246,7 +246,7 @@ for (const resume of [false, true])
       );
       assert.deepEqual(policy, {
         type: "workspaceWrite",
-        writableRoots: [f.cwd, gitDir, path.join(f.dir, ".npm")],
+        writableRoots: [f.cwd, path.join(f.dir, ".npm")],
         networkAccess: false,
         excludeTmpdirEnvVar: true,
         excludeSlashTmp: true,
@@ -254,6 +254,9 @@ for (const resume of [false, true])
       assert.deepEqual(
         thread.config["sandbox_workspace_write.writable_roots"],
         policy.writableRoots,
+      );
+      assert.ok(
+        policy.writableRoots.every((root: string) => !inside(root, gitDir)),
       );
       for (const protectedPath of [
         "refs/heads/main",

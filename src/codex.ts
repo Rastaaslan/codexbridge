@@ -1,12 +1,11 @@
 import {
   spawn,
   execFile,
-  execFileSync,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import path from "node:path";
 import { mkdirSync, realpathSync } from "node:fs";
-import { inside } from "./git.js";
+import { git, inside } from "./git.js";
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import type { Config } from "./config.js";
@@ -245,33 +244,24 @@ export class AppServerAdapter implements CodexAdapter {
         : realpathSync(
             path.resolve(
               o.cwd,
-              execFileSync("git", ["rev-parse", "--git-common-dir"], {
-                cwd: o.cwd,
-                encoding: "utf8",
-              }).trim(),
+              await git(o.cwd, ["rev-parse", "--git-common-dir"]),
             ),
           );
       const worktreeGitDir = o.readOnly
         ? null
         : realpathSync(
-            path.resolve(
-              o.cwd,
-              execFileSync("git", ["rev-parse", "--git-dir"], {
-                cwd: o.cwd,
-                encoding: "utf8",
-              }).trim(),
-            ),
+            path.resolve(o.cwd, await git(o.cwd, ["rev-parse", "--git-dir"])),
           );
       if (
         !o.readOnly &&
         (commonGitDir === worktreeGitDir ||
           inside(realpathSync(o.cwd), commonGitDir!) ||
-          inside(npmCache, commonGitDir!))
+          inside(npmCache, commonGitDir!) ||
+          inside(realpathSync(o.cwd), worktreeGitDir!) ||
+          inside(npmCache, worktreeGitDir!))
       )
         throw new Error("Worker requires an isolated linked worktree");
-      const writableRoots = o.readOnly
-        ? []
-        : [o.cwd, worktreeGitDir!, npmCache];
+      const writableRoots = o.readOnly ? [] : [o.cwd, npmCache];
       overrides["sandbox_workspace_write.writable_roots"] = writableRoots;
       const params = {
         cwd: o.cwd,

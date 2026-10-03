@@ -710,3 +710,73 @@ test("managed restart and failed candidate activation retain planner, admission,
     await f.cleanup();
   }
 });
+
+test("service diff, snapshot and recovery ignore worker Git callbacks and redirection", async () => {
+  const f = await fixture();
+  try {
+    const cwd = f.job.worktree!;
+    const metadata = await git(cwd, ["rev-parse", "--absolute-git-dir"]);
+    const marker = path.join(f.dir, "callback-ran");
+    const script = path.join(f.dir, "callback.cjs");
+    await writeFile(
+      script,
+      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed'); process.exit(1);`,
+    );
+    const command = `"${process.execPath.replaceAll("\\", "/")}" "${script.replaceAll("\\", "/")}"`;
+    await git(f.repo, ["config", "extensions.worktreeConfig", "true"]);
+    const worktreeConfig = path.join(metadata, "config.worktree");
+    // Write exactly the file the old worker writable roots exposed.
+    for (const [key, value] of [
+      ["core.fsmonitor", command],
+      ["core.hooksPath", f.dir],
+      ["core.worktree", path.join(f.dir, "must-not-be-used")],
+      ["filter.attack.clean", command],
+      ["filter.attack.process", command],
+      ["filter.attack.required", "true"],
+    ])
+      await git(f.repo, ["config", "--file", worktreeConfig, key, value]);
+    await writeFile(path.join(cwd, ".gitattributes"), "value filter=attack\n");
+    await assert.rejects(
+      f.workspace.diff(f.job),
+      /Per-worktree Git configuration/,
+    );
+    await assert.rejects(
+      f.core.integration.snapshot(f.job),
+      /Per-worktree Git configuration/,
+    );
+    await f.core.stop();
+    f.store.patch(f.job.id, { status: "CODEX_RUNNING" });
+    await f.core.recover();
+    assert.equal(f.store.get(f.job.id).status, "FAILED");
+    assert.match(
+      f.store.get(f.job.id).blocker!,
+      /Per-worktree Git configuration/,
+    );
+    await assert.rejects(readFile(marker), { code: "ENOENT" });
+    // Only the test/operator removes the rejected file; the service never does.
+    await rm(worktreeConfig);
+
+    // Repository attributes must not activate even a driver in shared config.
+    for (const name of ["clean", "smudge", "process"])
+      await git(f.repo, ["config", `filter.attack.${name}`, command]);
+    await git(f.repo, ["config", "filter.attack.required", "true"]);
+    await git(f.repo, ["config", "core.fsmonitor", command]);
+    await writeFile(path.join(cwd, "value"), "raw worker bytes\n");
+    const filtered = await f.core.integration.snapshot(f.job);
+    assert.equal(
+      await git(f.repo, ["show", `${filtered.tree}:value`]),
+      "raw worker bytes",
+    );
+    await f.workspace.diff(f.job);
+    // Checkout/read-tree also must not run a smudge or process callback.
+    await git(cwd, ["read-tree", "--reset", "-u", filtered.tree]);
+    await f.core.stop();
+    f.store.patch(f.job.id, { status: "CODEX_RUNNING" });
+    await f.core.recover();
+    assert.equal(f.store.get(f.job.id).status, "FAILED");
+    assert.match(f.store.get(f.job.id).blocker!, /Worktree intact/);
+    await assert.rejects(readFile(marker), { code: "ENOENT" });
+  } finally {
+    await f.cleanup();
+  }
+});
