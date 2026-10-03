@@ -22,7 +22,8 @@
     "format": "prettier --write src tests scripts public plugins docs .github *.json *.md *.yaml",
     "format:check": "prettier --check src tests scripts public plugins docs .github *.json *.md *.yaml",
     "check": "npm run build && npm test",
-    "audit:publication": "node scripts/audit-publication.mjs"
+    "audit:publication": "node scripts/audit-publication.mjs",
+    "test:live-hardened": "tsx scripts/live-hardened-worker.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
