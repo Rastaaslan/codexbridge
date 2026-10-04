@@ -768,7 +768,11 @@ test("managed restart and failed candidate activation retain planner, admission,
       await mkdir(path.join(release, "deploy/debian"), { recursive: true });
       await writeFile(
         path.join(release, "deploy/debian/release-policy.json"),
-        JSON.stringify({ runtimeSchema: 1, sqliteSchema: 4 }),
+        JSON.stringify({
+          runtimeSchema: 1,
+          sqliteSchema: 4,
+          minimumUpdaterVersion: 1,
+        }),
       );
       await git(release, ["init"]);
       await git(release, ["add", "."]);
@@ -787,6 +791,7 @@ test("managed restart and failed candidate activation retain planner, admission,
           commit: await git(release, ["rev-parse", "HEAD"]),
           runtimeSchema: 1,
           sqliteSchema: 4,
+          minimumUpdaterVersion: 1,
         }),
       );
     }

@@ -51,6 +51,21 @@ export function assertQuiescent(status) {
       "Active jobs, child processes or integrations; update refused. Wait or cancel explicitly.",
     );
 }
+// Monotonic activation/recovery contract, independent of runtime/database schemas.
+// Bump when releases start depending on new updater behavior; never read the
+// supported version from candidate code or metadata.
+export const UPDATER_VERSION = 1;
+export function validateUpdater(policy, allowLegacy = false) {
+  const required = policy?.minimumUpdaterVersion;
+  if (required === undefined && allowLegacy) return 0;
+  if (!Number.isSafeInteger(required) || required < 1)
+    throw Error("Invalid or missing minimumUpdaterVersion in release metadata");
+  if (required > UPDATER_VERSION)
+    throw Error(
+      `Release requires updater version ${required}; invoking updater supports ${UPDATER_VERSION}. Install the matching reviewed updater first.`,
+    );
+  return required;
+}
 export function validateRef(ref) {
   if (
     typeof ref !== "string" ||
@@ -303,7 +318,7 @@ export async function makeDriver(
       throw Error("Release must be directly inside releases directory");
     return resolved;
   };
-  async function compatibleRelease(release) {
+  async function compatibleRelease(release, allowLegacy = false) {
     await releasePath(release);
     const policy = JSON.parse(
       await readFile(
@@ -331,6 +346,11 @@ export async function makeDriver(
       throw Error(
         "A verified schema-v4 rollback baseline is required; manual recovery plan required for migration",
       );
+    const requirements = [manifest, policy, committedPolicy].map((metadata) =>
+      validateUpdater(metadata, allowLegacy),
+    );
+    if (requirements.some((required) => required !== requirements[0]))
+      throw Error("Updater compatibility metadata mismatch");
   }
   async function switchCurrent(release) {
     const temp = current + ".next";
@@ -393,7 +413,7 @@ export async function makeDriver(
       atomicJson(path.join(dataDir, "update-status.json"), state),
     current: () => realpath(current).then(releasePath),
     async validateRollback(previous, candidate) {
-      await compatibleRelease(previous);
+      await compatibleRelease(previous, true);
       await compatibleRelease(candidate);
     },
     async build(ref) {
@@ -439,6 +459,7 @@ export async function makeDriver(
       );
       if (manifest.runtimeSchema !== 1 || manifest.sqliteSchema !== 4)
         throw Error("Incompatible runtime schema; manual migration required");
+      validateUpdater(manifest);
       // Build/test subprocesses receive no production secrets or runtime path.
       const scratch = path.join(candidate, ".validation");
       await mkdir(scratch);
@@ -469,6 +490,7 @@ export async function makeDriver(
           commit,
           runtimeSchema: 1,
           sqliteSchema: 4,
+          minimumUpdaterVersion: manifest.minimumUpdaterVersion,
         });
         return candidate;
       } finally {
@@ -487,12 +509,13 @@ export async function makeDriver(
         if (error.code !== "ENOENT") throw error;
         return null;
       });
-      if (previous && previous !== release) await compatibleRelease(previous);
+      if (previous && previous !== release)
+        await compatibleRelease(previous, true);
       await switchCurrent(release);
     },
     async restore(release) {
       // Recovery trusts only the restoration target, never a damaged outgoing release.
-      await compatibleRelease(release);
+      await compatibleRelease(release, true);
       await switchCurrent(release);
     },
     restart: () =>

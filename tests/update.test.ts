@@ -223,7 +223,7 @@ test("real fetch pins the requested tag and validates isolated candidate before 
   await git(["config", "user.email", "test@example.invalid"]);
   await writeFile(
     path.join(repo, "deploy/debian/release-policy.json"),
-    '{"runtimeSchema":1,"sqliteSchema":4}',
+    '{"runtimeSchema":1,"sqliteSchema":4,"minimumUpdaterVersion":1}',
   );
   await writeFile(path.join(repo, "version.txt"), "old");
   await git(["add", "."]);
@@ -260,7 +260,7 @@ test("real fetch pins the requested tag and validates isolated candidate before 
   );
   assert.deepEqual(
     JSON.parse(await readFile(path.join(candidate, "release.json"), "utf8")),
-    { commit, runtimeSchema: 1, sqliteSchema: 4 },
+    { commit, runtimeSchema: 1, sqliteSchema: 4, minimumUpdaterVersion: 1 },
   );
   assert.deepEqual(
     validation.map((a) => a.slice(0, 2)),
@@ -310,7 +310,7 @@ test("real fetch pins the requested tag and validates isolated candidate before 
   // Merely editing the policy cannot fabricate a compatible committed baseline.
   await writeFile(
     path.join(previous, "deploy/debian/release-policy.json"),
-    '{"runtimeSchema":1,"sqliteSchema":4}',
+    '{"runtimeSchema":1,"sqliteSchema":4,"minimumUpdaterVersion":1}',
   );
   await assert.rejects(
     () => driver.validateRollback(previous, candidate),
@@ -331,6 +331,20 @@ test("real fetch pins the requested tag and validates isolated candidate before 
   );
   await assert.rejects(() => driver.build("not-a-real-ref"));
   assert.equal(validation.length, 3);
+  for (const minimumUpdaterVersion of [2, undefined, 0, "1", null]) {
+    await writeFile(
+      path.join(repo, "deploy/debian/release-policy.json"),
+      JSON.stringify({
+        runtimeSchema: 1,
+        sqliteSchema: 4,
+        minimumUpdaterVersion,
+      }),
+    );
+    await git(["commit", "-am", "unsupported updater requirement"]);
+    await assert.rejects(driver.build("HEAD"), /updater|minimumUpdaterVersion/);
+    assert.equal(validation.length, 3, "reject before npm validation");
+    assert.equal(await realpath(path.join(root, "current")), previous);
+  }
 });
 
 // Real Git policies and real filesystem activation; only service operations are stubbed.
@@ -352,7 +366,11 @@ async function compatibilityFixture(
   const root = path.join(dir, "installation"),
     data = path.join(dir, "data");
   await mkdir(data);
-  const policy = { runtimeSchema: 1, sqliteSchema: 4 };
+  const policy = {
+    runtimeSchema: 1,
+    sqliteSchema: 4,
+    minimumUpdaterVersion: 1,
+  };
   const git = async (cwd: string, args: string[]) =>
     (
       await execute(
@@ -802,4 +820,96 @@ test("concurrent maintenance publication has exactly one owner and never replace
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("updater contract rejects unsupported, invalid and inconsistent metadata before activation or recovery", async () => {
+  const f = await compatibilityFixture();
+  const { rm, access } = await import("node:fs/promises");
+  let quiesces = 0;
+  f.driver.quiesce = async () => {
+    quiesces++;
+  };
+  try {
+    for (const release of [f.old, f.candidate]) {
+      for (const source of ["manifest", "policy", "committedPolicy"]) {
+        for (const required of [2, 0, -1, 1.5, "1", null, undefined]) {
+          const fields = { ...f.policy, minimumUpdaterVersion: required };
+          if (source === "committedPolicy")
+            await f.commitPolicy(release, fields);
+          const file = path.join(
+            release,
+            source === "manifest"
+              ? "release.json"
+              : "deploy/debian/release-policy.json",
+          );
+          await writeFile(
+            file,
+            JSON.stringify(
+              source === "manifest"
+                ? {
+                    commit: await f.git(release, ["rev-parse", "HEAD"]),
+                    ...fields,
+                  }
+                : source === "committedPolicy"
+                  ? f.policy
+                  : fields,
+            ),
+          );
+          await assert.rejects(
+            transaction(f.driver, "main"),
+            /updater|Updater/,
+          );
+          await assert.rejects(
+            f.driver.activate(f.candidate),
+            /updater|Updater/,
+          );
+          await assert.rejects(f.driver.restore(release), /updater|Updater/);
+          assert.equal(await realpath(f.current), f.old);
+          await assert.rejects(access(f.current + ".next"));
+          await assert.rejects(access(f.maintenance));
+          await f.commitPolicy(release, f.policy);
+        }
+      }
+    }
+    assert.equal(quiesces, 0);
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy schema-v4 baseline remains recoverable but new candidates require an explicit updater contract", async () => {
+  const f = await compatibilityFixture();
+  const { rm } = await import("node:fs/promises");
+  try {
+    const legacy = { runtimeSchema: 1, sqliteSchema: 4 };
+    await f.commitPolicy(f.old, legacy);
+    await f.manifest(f.old, legacy);
+    assert.equal((await transaction(f.driver, "main")).phase, "completed");
+    await recover(f.driver, { phase: "activating", previous: f.old }, true);
+    assert.equal(await realpath(f.current), f.old);
+    await f.commitPolicy(f.candidate, legacy);
+    await f.manifest(f.candidate, legacy);
+    await assert.rejects(
+      f.driver.validateRollback(f.old, f.candidate),
+      /minimumUpdaterVersion/,
+    );
+    await assert.rejects(
+      f.driver.activate(f.candidate),
+      /minimumUpdaterVersion/,
+    );
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("repository release policy is supported by its matching updater", async () => {
+  const { validateUpdater, UPDATER_VERSION } =
+    await import("../scripts/self-update.mjs");
+  const policy = JSON.parse(
+    await readFile(
+      new URL("../deploy/debian/release-policy.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(validateUpdater(policy), UPDATER_VERSION);
 });

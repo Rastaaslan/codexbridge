@@ -64,3 +64,55 @@ procedure has been validated. Worker edit/test compatibility also requires live
 sandbox validation: protocol tests alone do not prove execution with network and
 shared Git writes disabled. Native tunnel availability must be checked separately
 from mocked tunnel contract tests.
+
+### Updater compatibility contract
+
+`deploy/debian/release-policy.json` declares `minimumUpdaterVersion`, a positive
+integer copied into generated `release.json`. The invoking root-owned runner
+has its own `UPDATER_VERSION` constant; candidate code cannot raise it. Version 1
+covers schema-v4 validation, degraded-tunnel health, target-only restoration and
+atomic maintenance publication. Increment the contract version when a release
+needs new activation/recovery behavior, and raise that release's minimum.
+Do not use the application version or database schema as the updater version.
+
+Build rejects absent, malformed or newer requirements before running npm.
+Activation checks the manifest, working policy and committed policy for the same
+supported requirement before switching `current`; transaction validation happens
+before maintenance. Restoration checks the target using the same contract.
+Legacy schema-v4 rollback targets may omit the requirement only when all three
+metadata sources omit it. New candidates must declare it. Runtime/SQLite schema
+checks and cross-version rollback blocking still apply independently.
+
+Older installed runners that predate this gate ignore the new field. They must
+be replaced administratively **before requesting a release using this contract**;
+a self-update cannot bootstrap enforcement. For a fresh installation, run the
+reviewed `deploy/debian/install.sh` from the target release checkout, which installs
+its matching runner and initialization script. For an existing installation,
+use a separate reviewed administrator maintenance window with no update or
+recovery process running and no pending update/recovery transaction. Keep the
+runner compatible with both the current release and the rollback target; do not
+downgrade it while either requires a newer contract.
+
+From a clean, reviewed checkout pinned to the intended full commit, validate the
+matching source runner locally before installation:
+
+```sh
+git diff --exit-code HEAD -- scripts/self-update.mjs deploy/debian/release-policy.json
+node --input-type=module -e 'import { readFile } from "node:fs/promises"; import { validateUpdater } from "./scripts/self-update.mjs"; validateUpdater(JSON.parse(await readFile("deploy/debian/release-policy.json", "utf8")));'
+```
+
+Then, only during that separately authorized administrator operation, install
+with an atomic replacement in the destination directory (do not overwrite a
+runner in place or run the broad installer just to replace this file):
+
+```sh
+stage=$(sudo mktemp /usr/local/lib/codexbridge/self-update.XXXXXXXX)
+sudo install -o root -g root -m 0644 scripts/self-update.mjs "$stage"
+sudo mv -Tf -- "$stage" /usr/local/lib/codexbridge/self-update.mjs
+cmp scripts/self-update.mjs /usr/local/lib/codexbridge/self-update.mjs
+node --input-type=module -e 'import { readFile } from "node:fs/promises"; import { validateUpdater } from "/usr/local/lib/codexbridge/self-update.mjs"; validateUpdater(JSON.parse(await readFile("deploy/debian/release-policy.json", "utf8")));'
+```
+
+Use the same pinned commit for the subsequent release request. These instructions
+are a future deployment procedure; CB-82 does not install a runner, invoke the
+installer or change any production service.
