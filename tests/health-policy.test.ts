@@ -127,8 +127,13 @@ test("real update health and boot recovery retain maintenance ordering with a de
     },
     async (url: string, options: any) => {
       assert.equal(options.headers.Authorization, "Bearer fixture-local");
-      if (url.endsWith("jobs_overview"))
-        return Response.json({ counts: { running: 0 } });
+      if (url.endsWith("operational_summary"))
+        return Response.json({
+          health: { orchestratorOk: true, maintenance: true },
+          scheduler: { runningJobs: 0, usedCapacity: 0 },
+          integrations: {},
+          activeIntegrationOperations: 0,
+        });
       assert.ok(url.endsWith("server_doctor"));
       await access(path.join(data, "maintenance.json"));
       return Response.json(

@@ -1,4 +1,4 @@
-﻿import { test } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   transaction,
@@ -334,7 +334,16 @@ test("real fetch pins the requested tag and validates isolated candidate before 
 });
 
 // Real Git policies and real filesystem activation; only service operations are stubbed.
-async function compatibilityFixture() {
+const idleStatus = {
+  health: { orchestratorOk: true, maintenance: true },
+  scheduler: { runningJobs: 0, usedCapacity: 0 },
+  integrations: {},
+  activeIntegrationOperations: 0,
+};
+
+async function compatibilityFixture(
+  request = async () => Response.json(idleStatus),
+) {
   const { makeDriver } = await import("../scripts/self-update.mjs");
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
@@ -392,9 +401,7 @@ async function compatibilityFixture() {
     path.join(data, "config.json"),
     JSON.stringify({ token: "fixture" }),
   );
-  const driver = await makeDriver(root, data, {}, undefined, async () =>
-    Response.json({ counts: { running: 0 } }),
-  );
+  const driver = await makeDriver(root, data, {}, undefined, request);
   driver.build = async () => candidate;
   driver.restart = async () => {};
   driver.health = async () => ({ orchestratorOk: true });
@@ -413,6 +420,83 @@ async function compatibilityFixture() {
     commitPolicy,
   };
 }
+
+test("quiescence rejects active work and untrusted evidence before activation", async () => {
+  let response: () => Promise<Response> = async () => Response.json(idleStatus);
+  const f = await compatibilityFixture(async () => response());
+  const { rm, access } = await import("node:fs/promises");
+  let activations = 0,
+    restarts = 0;
+  f.driver.activate = async () => {
+    activations++;
+  };
+  f.driver.restart = async () => {
+    restarts++;
+  };
+  try {
+    const statuses = [
+      ...[undefined, null, "0", -1, 0.5, 1].map(
+        (activeIntegrationOperations) => ({
+          ...idleStatus,
+          activeIntegrationOperations,
+        }),
+      ),
+      { ...idleStatus, scheduler: { runningJobs: 1, usedCapacity: 0 } },
+      { ...idleStatus, scheduler: { runningJobs: 0, usedCapacity: 1 } },
+      ...["VERIFYING", "PUBLISHING"].map((state) => ({
+        ...idleStatus,
+        integrations: { [state]: 1 },
+      })),
+      null,
+      {},
+      { counts: { running: 0 } },
+      ...[undefined, null, "0", -1, 0.5].map((runningJobs) => ({
+        ...idleStatus,
+        scheduler: { runningJobs, usedCapacity: 0 },
+      })),
+      ...[
+        undefined,
+        null,
+        [],
+        { VERIFYING: "0" },
+        { PUBLISHING: -1 },
+        { UNKNOWN: 0 },
+      ].map((integrations) => ({ ...idleStatus, integrations })),
+      { ...idleStatus, health: { orchestratorOk: true, maintenance: false } },
+      { ...idleStatus, health: { orchestratorOk: "true", maintenance: true } },
+    ];
+    for (const status of statuses) {
+      response = async () => Response.json(status);
+      await assert.rejects(transaction(f.driver, "HEAD"), /update refused/);
+      assert.equal(await realpath(f.current), f.old);
+      await assert.rejects(access(f.maintenance));
+    }
+    for (const unavailable of [
+      async () => {
+        throw Error("connection unavailable");
+      },
+      async () => new Response("unavailable", { status: 503 }),
+      async () => new Response("not JSON"),
+    ]) {
+      response = unavailable;
+      await assert.rejects(transaction(f.driver, "HEAD"));
+      assert.equal(await realpath(f.current), f.old);
+      await assert.rejects(access(f.maintenance));
+    }
+    assert.equal(activations, 0);
+    assert.equal(restarts, 0);
+    response = async () =>
+      Response.json({
+        ...idleStatus,
+        integrations: { SUCCEEDED: 2, FAILED: 1 },
+      });
+    await transaction(f.driver, "HEAD");
+    assert.equal(activations, 1);
+    assert.equal(restarts, 1);
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
 
 test("v4 compatibility rejects every metadata mismatch on either side before activation", async () => {
   const f = await compatibilityFixture();
@@ -638,7 +722,7 @@ for (const fault of [
         },
       };
       const driver = await makeDriver(${JSON.stringify(f.root)}, ${JSON.stringify(f.data)}, {}, undefined,
-        async () => Response.json({ counts: { running: 0 } }), io);
+        async () => Response.json(${JSON.stringify(idleStatus)}), io);
       try { await driver.quiesce(); process.exit(74); }
       catch (e) {
         if (!e.message.startsWith('injected')) throw e;

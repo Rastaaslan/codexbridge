@@ -19,6 +19,38 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 const exec = promisify(execFile);
+// Only explicit, well-formed idle evidence permits activation. Job status
+// counts alone omit surviving child processes and integration operations.
+export function assertQuiescent(status) {
+  const count = (value) => Number.isSafeInteger(value) && value >= 0;
+  const integrations = status?.integrations;
+  if (
+    status?.health?.orchestratorOk !== true ||
+    status.health.maintenance !== true ||
+    !count(status?.scheduler?.runningJobs) ||
+    !count(status?.scheduler?.usedCapacity) ||
+    !count(status?.activeIntegrationOperations) ||
+    !integrations ||
+    typeof integrations !== "object" ||
+    Array.isArray(integrations) ||
+    Object.entries(integrations).some(
+      ([state, value]) =>
+        !["VERIFYING", "PUBLISHING", "SUCCEEDED", "FAILED"].includes(state) ||
+        !count(value),
+    )
+  )
+    throw Error("Untrusted quiescence status; update refused.");
+  if (
+    status.scheduler.runningJobs > 0 ||
+    status.scheduler.usedCapacity > 0 ||
+    status.activeIntegrationOperations > 0 ||
+    (integrations.VERIFYING ?? 0) > 0 ||
+    (integrations.PUBLISHING ?? 0) > 0
+  )
+    throw Error(
+      "Active jobs, child processes or integrations; update refused. Wait or cancel explicitly.",
+    );
+}
 export function validateRef(ref) {
   if (
     typeof ref !== "string" ||
@@ -446,9 +478,7 @@ export async function makeDriver(
     hold: () => acquireMaintenance("recovery awaiting health", true),
     async quiesce() {
       await acquireMaintenance("self-update");
-      const status = await api("jobs_overview");
-      if (status.counts.running > 0)
-        throw Error("Active jobs; update refused. Wait or cancel explicitly.");
+      assertQuiescent(await api("operational_summary"));
     },
     async activate(release) {
       await compatibleRelease(release);

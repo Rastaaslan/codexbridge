@@ -54,7 +54,10 @@ test("preflight fails closed with concrete blockers and preserves strict read-on
       path.join(f.dir, "deploy/debian/release-policy.json"),
       '{"runtimeSchema":1,"sqliteSchema":4}',
     );
-    await writeFile(path.join(f.dir, ".gitignore"), "*.db*\nrelease.json\n");
+    await writeFile(
+      path.join(f.dir, ".gitignore"),
+      "*.db*\nrelease.json\nlogs/\n",
+    );
     await git(f.dir, ["init"]);
     await git(f.dir, ["config", "user.name", "Test"]);
     await git(f.dir, ["config", "user.email", "test@example.invalid"]);
@@ -81,6 +84,39 @@ test("preflight fails closed with concrete blockers and preserves strict read-on
     assert.equal(ready.ready, true);
     assert.equal(ready.currentRelease, commit);
     assert.equal(ready.candidateCommit, commit);
+    for (const evidence of [
+      null,
+      {},
+      { ...(await health()), maintenance: "false" },
+    ]) {
+      const rejected = await releasePreflight(f.core, "HEAD", {
+        ...options,
+        health: (async () => evidence) as typeof health,
+      });
+      assert.equal(rejected.ready, false);
+      assert.ok(
+        rejected.blockers.some((b) => b.code === "APPLICATION_UNHEALTHY"),
+      );
+    }
+    const unavailable = await releasePreflight(f.core, "HEAD", {
+      ...options,
+      health: async () => {
+        throw Error("Unavailable status");
+      },
+    });
+    assert.equal(unavailable.ready, false);
+    assert.ok(
+      unavailable.blockers.some((b) => b.code === "APPLICATION_UNHEALTHY"),
+    );
+    const maintained = await releasePreflight(f.core, "HEAD", {
+      ...options,
+      health: async () => ({ ...(await health()), maintenance: true }),
+    });
+    assert.equal(maintained.ready, false);
+    assert.deepEqual(
+      maintained.blockers.map((b) => b.code),
+      ["MAINTENANCE"],
+    );
     // The baseline manifest must satisfy the same schema contract as activation.
     for (const metadata of [
       {},
@@ -153,6 +189,20 @@ test("preflight fails closed with concrete blockers and preserves strict read-on
       ),
     );
     f.store.patch(job.id, { childPid: null });
+    assert.equal(await git(f.dir, ["status", "--porcelain"]), "");
+    const active = f.core.integration.active;
+    try {
+      f.core.integration.active = (id) => id === job.id;
+      const integrating = await releasePreflight(f.core, "HEAD", options);
+      assert.equal(integrating.ready, false);
+      assert.deepEqual(
+        integrating.blockers.map((b) => b.code),
+        ["ACTIVE_WORK"],
+      );
+    } finally {
+      f.core.integration.active = active;
+    }
+    assert.equal((await releasePreflight(f.core, "HEAD", options)).ready, true);
     await writeFile(path.join(f.dir, "dirty"), "change");
     assert.ok(
       (await releasePreflight(f.core, "HEAD", options)).blockers.some(

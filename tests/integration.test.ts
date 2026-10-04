@@ -11,6 +11,8 @@ import { Orchestrator } from "../src/orchestrator.js";
 import { createSchema } from "../src/domain.js";
 import { Integration, integrationSchema } from "../src/integration.js";
 import { toolDefinitions } from "../src/tools.js";
+import { operationalSummary, releasePreflight } from "../src/readiness.js";
+import { existsSync } from "node:fs";
 
 async function fixture(
   options: {
@@ -116,6 +118,139 @@ async function fixture(
     },
   };
 }
+
+for (const terminal of ["SUCCEEDED", "FAILED"] as const)
+  test(`release checks wait for integration cleanup after ${terminal}`, async (t) => {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>();
+    const cleanup = Promise.withResolvers<void>();
+    let operation: Promise<unknown> | undefined;
+    try {
+      await f.core.stop();
+      const release = path.join(f.dir, "release");
+      await mkdir(path.join(release, "deploy/debian"), { recursive: true });
+      await writeFile(
+        path.join(release, "deploy/debian/release-policy.json"),
+        '{"runtimeSchema":1,"sqliteSchema":4}',
+      );
+      await writeFile(path.join(release, ".gitignore"), "release.json\n");
+      await git(release, ["init"]);
+      await git(release, ["add", "."]);
+      await git(release, [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "baseline",
+      ]);
+      const commit = await git(release, ["rev-parse", "HEAD"]);
+      await writeFile(
+        path.join(release, "release.json"),
+        JSON.stringify({ commit, runtimeSchema: 1, sqliteSchema: 4 }),
+      );
+      const health = async () => ({
+        ok: true,
+        orchestratorOk: true,
+        availability: "ready",
+        tunnel: "ready",
+        checks: [],
+        release: commit,
+        managed: true,
+        update: null,
+        maintenance: existsSync(
+          path.join(f.config.dataDir, "maintenance.json"),
+        ),
+      });
+      const options = { releaseDir: release, health };
+      const { makeDriver } = await import("../scripts/self-update.mjs");
+      await writeFile(
+        path.join(f.config.dataDir, "config.json"),
+        JSON.stringify({ token: f.config.token }),
+      );
+      const driver = await makeDriver(
+        f.dir,
+        f.config.dataDir,
+        {},
+        undefined,
+        async (url: string) => {
+          assert.ok(url.endsWith("/operational_summary"));
+          return Response.json(await operationalSummary(f.core, health));
+        },
+      );
+      // Hold the actual cleanup boundary, without mocking activity or status evidence.
+      const integration = f.core.integration as unknown as {
+        removeCandidate(repository: string, candidate: string): Promise<void>;
+      };
+      const remove = integration.removeCandidate.bind(integration);
+      t.mock.method(
+        integration,
+        "removeCandidate",
+        async (repository, candidate) => {
+          entered.resolve();
+          await cleanup.promise;
+          await remove(repository, candidate);
+        },
+      );
+      if (terminal === "FAILED")
+        f.config.integrationCommands = [
+          {
+            command: process.execPath,
+            args: ["-e", "process.exit(1)"],
+            timeoutMs: 1000,
+          },
+        ];
+      operation = f.core.integration.integrate({
+        id: f.job.id,
+        target: "cleanup",
+        expectedBase: f.base,
+      });
+      await Promise.race([
+        entered.promise,
+        operation.then(() => {
+          throw Error("Integration settled before cleanup was held");
+        }),
+      ]);
+      assert.equal(
+        f.core.integration.history(f.job.id).at(-1)?.status,
+        terminal,
+      );
+      assert.equal(f.core.integration.active(f.job.id), true);
+      assert.equal(
+        (await operationalSummary(f.core, health)).activeIntegrationOperations,
+        1,
+      );
+      const blocked = await releasePreflight(f.core, "HEAD", options);
+      assert.equal(blocked.ready, false);
+      assert.deepEqual(
+        blocked.blockers.map((b) => b.code),
+        ["ACTIVE_WORK"],
+      );
+      await assert.rejects(
+        driver.quiesce(),
+        /Active jobs, child processes or integrations/,
+      );
+      await driver.resume();
+      cleanup.resolve();
+      await operation;
+      assert.equal(f.core.integration.active(f.job.id), false);
+      assert.equal(
+        (await operationalSummary(f.core, health)).activeIntegrationOperations,
+        0,
+      );
+      assert.equal(
+        (await releasePreflight(f.core, "HEAD", options)).ready,
+        true,
+      );
+      await driver.quiesce();
+      await driver.resume();
+    } finally {
+      cleanup.resolve();
+      await operation;
+      await f.cleanup();
+    }
+  });
 
 test("explicit integration, strict surfaces, idempotency, restart and downstream startRef", async () => {
   const f = await fixture();

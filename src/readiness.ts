@@ -37,6 +37,7 @@ export const operationalSchema = z.strictObject({
     }),
   ),
   integrations: counts,
+  activeIntegrationOperations: count,
   retries: z.strictObject({ pending: count, exhausted: count }),
   humanAttention: count,
 });
@@ -82,6 +83,7 @@ export async function operationalSummary(core: Orchestrator, health = doctor) {
         };
       }),
     integrations,
+    activeIntegrationOperations: core.integration.activeOperations,
     retries: {
       pending: jobs.filter((j) => j.retry.nextRetryAt).length,
       exhausted: jobs.filter((j) => j.retry.exhausted).length,
@@ -121,6 +123,12 @@ export async function releasePreflight(
     candidateCommit: string | null = null;
   try {
     const h = await (options.health ?? doctor)(core);
+    healthSchema.parse({
+      orchestratorOk: h.orchestratorOk,
+      availability: h.availability,
+      release: h.release,
+      maintenance: h.maintenance,
+    });
     currentRelease =
       h.release && /^[0-9a-f]{40,64}$/.test(h.release) ? h.release : null;
     if (!h.orchestratorOk)
@@ -138,6 +146,7 @@ export async function releasePreflight(
   }
   if (
     core.scheduler().runningJobs ||
+    core.integration.activeOperations ||
     core.store.list().some((j) => core.integration.active(j.id))
   )
     block(

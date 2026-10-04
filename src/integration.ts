@@ -57,15 +57,24 @@ export const integrationSchema = z.strictObject({
 });
 type Attempt = z.infer<typeof integrationSchema>;
 export class Integration {
-  private pending = new Set<Promise<Attempt>>();
-  async settle() {
-    await Promise.allSettled([...this.pending]);
+  // Terminal results are persisted before cleanup; pending operations remain
+  // active until execute() has also finished removing the candidate worktree.
+  private pending = new Map<Promise<Attempt>, string>();
+  get activeOperations() {
+    return this.pending.size;
   }
-  integrate(input: unknown) {
-    const promise = this.execute(input);
-    this.pending.add(promise);
-    void promise.finally(() => this.pending.delete(promise)).catch(() => {});
-    return promise;
+  async settle() {
+    await Promise.allSettled([...this.pending.keys()]);
+  }
+  async integrate(input: unknown) {
+    const request = integrationInputSchema.parse(input);
+    const promise = this.execute(request);
+    this.pending.set(promise, request.id);
+    try {
+      return await promise;
+    } finally {
+      this.pending.delete(promise);
+    }
   }
   constructor(
     private config: Config,
@@ -184,9 +193,15 @@ export class Integration {
     );
   }
   active(id: string) {
-    return this.history(id).some((a) =>
-      ["VERIFYING", "PUBLISHING"].includes(a.status),
+    return (
+      [...this.pending.values()].includes(id) ||
+      this.history(id).some((a) =>
+        ["VERIFYING", "PUBLISHING"].includes(a.status),
+      )
     );
+  }
+  private async removeCandidate(repository: string, candidate: string) {
+    await git(repository, ["worktree", "remove", "--force", candidate]);
   }
   private save(a: Attempt) {
     this.store.db
@@ -420,12 +435,7 @@ export class Integration {
       this.save(a);
     } finally {
       if (candidate)
-        await git(job.repository, [
-          "worktree",
-          "remove",
-          "--force",
-          candidate,
-        ]).catch(() => {});
+        await this.removeCandidate(job.repository, candidate).catch(() => {});
     }
     return a;
   }
