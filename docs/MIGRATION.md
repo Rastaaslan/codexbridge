@@ -60,7 +60,9 @@ overwrite another operation's marker.
 
 This is a fail-closed migration policy, **not a v4-to-v1 rollback implementation**.
 Cross-version rollout remains blocked until a separate migration/recovery
-procedure has been validated. Worker edit/test compatibility also requires live
+procedure has been validated. See [CB-92 rollback evidence](CB-92-ROLLBACK.md)
+for the WAL, lifecycle and recovery-journal counterexamples behind this gate.
+Worker edit/test compatibility also requires live
 sandbox validation: protocol tests alone do not prove execution with network and
 shared Git writes disabled. Native tunnel availability must be checked separately
 from mocked tunnel contract tests.

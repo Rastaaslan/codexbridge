@@ -344,7 +344,7 @@ export async function makeDriver(
       committedPolicy.sqliteSchema !== 4
     )
       throw Error(
-        "A verified schema-v4 rollback baseline is required; manual recovery plan required for migration",
+        "A verified schema-v4 rollback baseline is required; cross-schema activation is forbidden: updater v1 has no durable database snapshot/restore contract",
       );
     const requirements = [manifest, policy, committedPolicy].map((metadata) =>
       validateUpdater(metadata, allowLegacy),

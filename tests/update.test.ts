@@ -913,3 +913,178 @@ test("repository release policy is supported by its matching updater", async () 
   );
   assert.equal(validateUpdater(policy), UPDATER_VERSION);
 });
+
+// Counterexample for relaxing the schema gate: idle scheduling is not a cold DB.
+test("v1 WAL state survives rejected activation; copying only the main DB loses committed state", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { Store } = await import("../src/database.js");
+  const { copyFile, rm } = await import("node:fs/promises");
+  const f = await compatibilityFixture();
+  const file = path.join(f.data, "codexbridge.db");
+  await rm(file);
+  const db = new DatabaseSync(file);
+  try {
+    db.exec(`PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+      CREATE TABLE jobs (id TEXT PRIMARY KEY);
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      PRAGMA user_version=1; PRAGMA wal_checkpoint(TRUNCATE);`);
+    db.prepare("INSERT INTO settings VALUES (?, ?)").run(
+      "queued-state",
+      "keep",
+    );
+    assert.ok((await readFile(file + "-wal")).length > 0);
+    const copy = path.join(f.dir, "main-only.db");
+    await copyFile(file, copy);
+    const incomplete = new DatabaseSync(copy);
+    try {
+      assert.equal(
+        incomplete.prepare("SELECT count(*) AS n FROM settings").get()!.n,
+        0,
+      );
+      assert.equal(
+        db.prepare("SELECT count(*) AS n FROM settings").get()!.n,
+        1,
+      );
+    } finally {
+      incomplete.close();
+    }
+    const legacy = { runtimeSchema: 1, sqliteSchema: 1 };
+    await f.commitPolicy(f.old, legacy);
+    await f.manifest(f.old, legacy);
+    await mkdir(path.join(f.data, "worktrees"));
+    await writeFile(path.join(f.data, "worktrees/job.txt"), "unrelated job");
+    const files = [
+      "codexbridge.db",
+      "codexbridge.db-wal",
+      "codexbridge.db-shm",
+      "config.json",
+      "worktrees/job.txt",
+    ];
+    const before = await Promise.all(
+      files.map((name) => readFile(path.join(f.data, name))),
+    );
+    let lifecycleCalls = 0;
+    f.driver.quiesce = f.driver.restart = async () => {
+      lifecycleCalls++;
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(
+        transaction(f.driver, "main"),
+        /cross-schema activation is forbidden/,
+      );
+      await assert.rejects(
+        f.driver.activate(f.candidate),
+        /cross-schema activation is forbidden/,
+      );
+      assert.equal(await realpath(f.current), f.old);
+      for (const [index, name] of files.entries())
+        assert.deepEqual(
+          await readFile(path.join(f.data, name)),
+          before[index],
+        );
+    }
+    assert.equal(lifecycleCalls, 0);
+    // In this disposable fixture only, demonstrate what opening the candidate
+    // Store would do even with maintenance held, before any health check.
+    await f.driver.hold();
+    const migrated = new Store(file);
+    try {
+      assert.equal(
+        migrated.db.prepare("PRAGMA user_version").get()!.user_version,
+        4,
+      );
+      assert.equal(
+        migrated.db.prepare("SELECT value FROM settings").get()!.value,
+        "keep",
+      );
+      await assert.rejects(
+        f.driver.restore(f.old),
+        /cross-schema activation is forbidden/,
+      );
+      assert.equal(
+        migrated.db.prepare("PRAGMA user_version").get()!.user_version,
+        4,
+      );
+      assert.equal(
+        await realpath(f.current),
+        f.old,
+        "old code selection cannot undo migration",
+      );
+    } finally {
+      migrated.close();
+    }
+  } finally {
+    db.close();
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+for (const phase of ["activating", "rollback_failed", "boot_pending_health"]) {
+  test(`incompatible ${phase} recovery repeatedly fails closed without touching runtime state`, async () => {
+    const { makeDriver } = await import("../scripts/self-update.mjs");
+    const { rm, unlink } = await import("node:fs/promises");
+    const f = await compatibilityFixture();
+    try {
+      const legacy = { runtimeSchema: 1, sqliteSchema: 1 };
+      await f.commitPolicy(f.old, legacy);
+      await f.manifest(f.old, legacy);
+      // Model an inherited interrupted journal, never bypass the real gate.
+      await unlink(f.current);
+      await symlink(f.candidate, f.current);
+      const state = { phase, previous: f.old, candidate: f.candidate };
+      await f.driver.save(state);
+      const journal = await readFile(path.join(f.data, "update-status.json"));
+      for (const boot of [true, false, true]) {
+        const fresh = await makeDriver(f.root, f.data, {}, async () => {
+          throw Error("unexpected external command");
+        });
+        // Git validation uses disposable repositories; no lifecycle commands.
+        fresh.restore = f.driver.restore;
+        await assert.rejects(
+          recover(fresh, state, boot),
+          /cross-schema activation is forbidden/,
+        );
+        assert.equal(await realpath(f.current), f.candidate);
+        assert.deepEqual(
+          await readFile(path.join(f.data, "update-status.json")),
+          journal,
+        );
+        assert.equal(
+          await readFile(path.join(f.data, "codexbridge.db"), "utf8"),
+          "untouched database",
+        );
+        assert.equal(
+          JSON.parse(await readFile(f.maintenance, "utf8")).owner,
+          "codexbridge-update",
+        );
+      }
+    } finally {
+      await rm(f.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("restore failure retains maintenance and recovery health failure never resumes scheduling", async () => {
+  const f = fixture("health");
+  f.driver.restore = async () => {
+    throw Error("injected restore failure");
+  };
+  await assert.rejects(transaction(f.driver, "main"), /Rollback failed/);
+  assert.equal(f.state.phase, "rollback_failed");
+  assert.equal(f.current, "new");
+  assert.equal(f.maintenance, true);
+  assert.equal(f.events.includes("resume"), false);
+  const unhealthy = fixture("rollback");
+  await recover(
+    unhealthy.driver,
+    { phase: "activating", previous: "old" },
+    true,
+  );
+  await assert.rejects(
+    verifyRecovery(unhealthy.driver, unhealthy.state),
+    /unhealthy/,
+  );
+  assert.equal(unhealthy.state.phase, "rollback_failed");
+  assert.equal(unhealthy.maintenance, true);
+  assert.equal(unhealthy.events.includes("resume"), false);
+});
