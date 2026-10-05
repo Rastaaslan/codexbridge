@@ -56,7 +56,7 @@ async function fixture() {
   await writeFile(path.join(old, "release.json"), manifest);
   await mkdir(path.join(candidate, "deploy/debian"), { recursive: true });
   const policy = {
-    runtimeSchema: 1,
+    runtimeSchema: 2,
     sqliteSchema: 4,
     minimumUpdaterVersion: 2,
   };

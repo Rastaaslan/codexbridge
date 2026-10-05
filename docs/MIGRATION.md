@@ -142,3 +142,18 @@ be edited to pretend compatibility. Use the installed runner's read-only
 for preflight. The separate administrator procedure first boots the same v1
 release with instrumentation under maintenance. It is not part of the application
 self-update and has not been performed by this job.
+
+### CB-137: reject pre-contract updaters before candidate execution
+
+The CB-137 replacement for candidate `5f3ff316` declares `runtimeSchema: 2`,
+`sqliteSchema: 4`, `minimumUpdaterVersion: 2`. Runtime schema 2 identifies the
+release compatibility contract, not a new SQLite migration. It deliberately
+uses the historical updater's existing runtimeSchema gate: the actual deployed
+runner rejects this policy during build before npm, maintenance or activation,
+even though it does not understand minimumUpdaterVersion. The matching revised
+runner supports contracts 1 and 2, requires matching manifest/on-disk/committed
+runtimeSchema, preserves the fetched value in release.json, and requires updater
+contract 2 for runtimeSchema 2. Historical source metadata remains untouched.
+This supersedes runtimeSchema-1-only candidate instructions above. Install the
+matching revised runner, bootstrap and unit before any revised-candidate request;
+see [the administrator checklist and dry-run evidence](CB-137-ROOT-UPDATER-GATE.md).

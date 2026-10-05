@@ -170,9 +170,9 @@ export async function releasePreflight(
       !currentRelease ||
       release.commit !== currentRelease ||
       !/^[0-9a-f]{40,64}$/.test(release.commit) ||
-      release.runtimeSchema !== 1 ||
+      ![1, 2].includes(release.runtimeSchema) ||
       release.sqliteSchema !== schemaVersion ||
-      policy.runtimeSchema !== 1 ||
+      policy.runtimeSchema !== release.runtimeSchema ||
       policy.sqliteSchema !== schemaVersion
     )
       throw Error("baseline");
@@ -251,8 +251,10 @@ export async function releasePreflight(
         `${candidateCommit}:deploy/debian/release-policy.json`,
       ]),
     );
-    if (policy.runtimeSchema !== 1 || policy.sqliteSchema !== 4)
+    if (![1, 2].includes(policy.runtimeSchema) || policy.sqliteSchema !== 4)
       throw Error("schema");
+    if (policy.runtimeSchema === 2 && policy.minimumUpdaterVersion !== 2)
+      throw Error("runtime contract required");
     if (schemaVersion === 1 && policy.minimumUpdaterVersion !== 2)
       throw Error("cold rollback contract required");
     if (policy.minimumUpdaterVersion !== undefined) {
@@ -280,7 +282,7 @@ export async function releasePreflight(
   } catch {
     block(
       "CANDIDATE_COMPATIBILITY",
-      "Candidate must exist locally, declare runtimeSchema 1 and sqliteSchema 4, and be supported by the installed updater; build/test validation is still required before activation.",
+      "Candidate must exist locally, declare supported runtimeSchema 1/2 and sqliteSchema 4, and be supported by the installed updater; build/test validation is still required before activation.",
     );
   }
   return preflightSchema.parse({

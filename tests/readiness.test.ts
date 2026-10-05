@@ -389,3 +389,74 @@ test("cross-schema preflight requires installed updater 2 rather than candidate 
     await f.cleanup();
   }
 });
+
+test("runtime contract 2 preflight accepts matching installed runner and rejects old runner or inconsistent baseline", async () => {
+  const f = await fixture();
+  try {
+    await mkdir(path.join(f.dir, "deploy/debian"), { recursive: true });
+    const policy = await readFile("deploy/debian/release-policy.json", "utf8");
+    await writeFile(
+      path.join(f.dir, "deploy/debian/release-policy.json"),
+      policy,
+    );
+    await writeFile(
+      path.join(f.dir, ".gitignore"),
+      "*.db*\nrelease.json\nlogs/\ninstalled.mjs\n",
+    );
+    await git(f.dir, ["init"]);
+    await git(f.dir, ["add", "."]);
+    await git(f.dir, [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "runtime contract 2",
+    ]);
+    const commit = (await git(f.dir, ["rev-parse", "HEAD"])).trim();
+    const manifest = { commit, ...JSON.parse(policy) };
+    await writeFile(path.join(f.dir, "release.json"), JSON.stringify(manifest));
+    const installedUpdaterFile = path.join(f.dir, "installed.mjs");
+    const options = {
+      releaseDir: f.dir,
+      installedUpdaterFile,
+      health: async () => ({
+        ok: true,
+        orchestratorOk: true,
+        availability: "ready",
+        tunnel: "ready",
+        checks: [],
+        release: commit,
+        maintenance: false,
+        managed: true,
+        update: null,
+      }),
+    };
+    for (const installed of [
+      "// historical updater without a contract\n",
+      "export const UPDATER_VERSION = 1;\n",
+      "export const UPDATER_VERSION = 2;\n",
+    ]) {
+      await writeFile(installedUpdaterFile, installed);
+      const result = await releasePreflight(f.core, "HEAD", options);
+      assert.equal(result.ready, installed.includes("= 2;"));
+      if (!result.ready)
+        assert.deepEqual(
+          result.blockers.map((b) => b.code),
+          ["CANDIDATE_COMPATIBILITY"],
+        );
+    }
+    await writeFile(
+      path.join(f.dir, "release.json"),
+      JSON.stringify({ ...manifest, runtimeSchema: 1 }),
+    );
+    const mismatch = await releasePreflight(f.core, "HEAD", options);
+    assert.deepEqual(
+      mismatch.blockers.map((b) => b.code),
+      ["PREVIOUS_RELEASE"],
+    );
+  } finally {
+    await f.cleanup();
+  }
+});

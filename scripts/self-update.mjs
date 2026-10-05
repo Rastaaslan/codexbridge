@@ -204,6 +204,11 @@ export function assertQuiescent(status) {
 export const UPDATER_VERSION = 2;
 export function validateUpdater(policy, allowLegacy = false) {
   const required = policy?.minimumUpdaterVersion;
+  if (
+    policy?.runtimeSchema === 2 &&
+    (!Number.isSafeInteger(required) || required < 2)
+  )
+    throw Error("Runtime schema 2 requires updater contract 2 or newer");
   if (required === undefined && allowLegacy) return 0;
   if (!Number.isSafeInteger(required) || required < 1)
     throw Error("Invalid or missing minimumUpdaterVersion in release metadata");
@@ -792,11 +797,11 @@ export async function makeDriver(
     if (
       !/^[0-9a-f]{40,64}$/.test(head) ||
       manifest.commit !== head ||
-      manifest.runtimeSchema !== 1 ||
+      ![1, 2].includes(manifest.runtimeSchema) ||
       ![4, ...(allowLegacy ? [1] : [])].includes(manifest.sqliteSchema) ||
-      policy.runtimeSchema !== 1 ||
+      policy.runtimeSchema !== manifest.runtimeSchema ||
       policy.sqliteSchema !== manifest.sqliteSchema ||
-      committedPolicy.runtimeSchema !== 1 ||
+      committedPolicy.runtimeSchema !== manifest.runtimeSchema ||
       committedPolicy.sqliteSchema !== manifest.sqliteSchema
     )
       throw Error(
@@ -956,7 +961,10 @@ export async function makeDriver(
           "utf8",
         ),
       );
-      if (manifest.runtimeSchema !== 1 || manifest.sqliteSchema !== 4)
+      if (
+        ![1, 2].includes(manifest.runtimeSchema) ||
+        manifest.sqliteSchema !== 4
+      )
         throw Error("Incompatible runtime schema; manual migration required");
       validateUpdater(manifest);
       // Build/test subprocesses receive no production secrets or runtime path.
@@ -987,7 +995,7 @@ export async function makeDriver(
         await run("npm", ["test"], candidate, env);
         await atomicJson(path.join(candidate, "release.json"), {
           commit,
-          runtimeSchema: 1,
+          runtimeSchema: manifest.runtimeSchema,
           sqliteSchema: 4,
           minimumUpdaterVersion: manifest.minimumUpdaterVersion,
         });
