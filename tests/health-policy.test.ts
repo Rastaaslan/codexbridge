@@ -142,6 +142,7 @@ test("real update health and boot recovery retain maintenance ordering with a de
     },
   );
   driver.validateRollback = async () => {}; // Compatibility is covered by update tests.
+  driver.verifyEvidence = async () => {}; // Snapshot evidence is covered there too.
   driver.current = async () => selected;
   driver.build = async () => candidate;
   driver.activate = async (value: string) => {

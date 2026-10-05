@@ -111,6 +111,7 @@ export async function releasePreflight(
   options: {
     health?: typeof doctor;
     releaseDir?: string;
+    installedUpdaterFile?: string;
   } = {},
 ) {
   preflightInput.parse({ candidateRef });
@@ -156,8 +157,8 @@ export async function releasePreflight(
   const schemaVersion = Number(
     core.store.db.prepare("PRAGMA user_version").get()!.user_version,
   );
-  if (schemaVersion !== 4)
-    block("MIGRATION_STATE", "Runtime database must be at schema v4.");
+  if (![1, 4].includes(schemaVersion))
+    block("MIGRATION_STATE", "Runtime database must be at schema v1 or v4.");
   try {
     const release = JSON.parse(
       await readFile(path.join(root, "release.json"), "utf8"),
@@ -170,15 +171,15 @@ export async function releasePreflight(
       release.commit !== currentRelease ||
       !/^[0-9a-f]{40,64}$/.test(release.commit) ||
       release.runtimeSchema !== 1 ||
-      release.sqliteSchema !== 4 ||
+      release.sqliteSchema !== schemaVersion ||
       policy.runtimeSchema !== 1 ||
-      policy.sqliteSchema !== 4
+      policy.sqliteSchema !== schemaVersion
     )
       throw Error("baseline");
   } catch {
     block(
       "PREVIOUS_RELEASE",
-      "A current release manifest and schema-v4 rollback baseline are required.",
+      "A matching current release manifest and schema-v1/v4 rollback baseline are required.",
     );
   }
   const git = async (args: string[]) =>
@@ -252,10 +253,34 @@ export async function releasePreflight(
     );
     if (policy.runtimeSchema !== 1 || policy.sqliteSchema !== 4)
       throw Error("schema");
+    if (schemaVersion === 1 && policy.minimumUpdaterVersion !== 2)
+      throw Error("cold rollback contract required");
+    if (policy.minimumUpdaterVersion !== undefined) {
+      const required = policy.minimumUpdaterVersion;
+      if (!Number.isSafeInteger(required) || required < 1)
+        throw Error("updater requirement");
+      // Read root-owned installed code as data. Never execute/import candidate or
+      // old updater scripts just to query capabilities (old runners have no query mode).
+      const file =
+        options.installedUpdaterFile ??
+        "/usr/local/lib/codexbridge/self-update.mjs";
+      const info = await stat(file);
+      if (
+        !options.installedUpdaterFile &&
+        (info.uid !== 0 || info.mode & 0o022)
+      )
+        throw Error("unsafe installed updater");
+      const installed = await readFile(file, "utf8");
+      const version = Number(
+        installed.match(/^export const UPDATER_VERSION = (\d+);$/m)?.[1],
+      );
+      if (!Number.isSafeInteger(version) || version < required)
+        throw Error("installed updater too old");
+    }
   } catch {
     block(
       "CANDIDATE_COMPATIBILITY",
-      "Candidate must exist locally and declare runtimeSchema 1 and sqliteSchema 4; build/test validation is still required before activation.",
+      "Candidate must exist locally, declare runtimeSchema 1 and sqliteSchema 4, and be supported by the installed updater; build/test validation is still required before activation.",
     );
   }
   return preflightSchema.parse({

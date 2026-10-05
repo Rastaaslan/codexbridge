@@ -310,3 +310,82 @@ for (const version of [1, 2, 3, 4])
       await f.cleanup();
     }
   });
+
+test("cross-schema preflight requires installed updater 2 rather than candidate self-attestation", async () => {
+  const f = await fixture();
+  try {
+    await mkdir(path.join(f.dir, "deploy/debian"), { recursive: true });
+    const policy = path.join(f.dir, "deploy/debian/release-policy.json");
+    await writeFile(
+      policy,
+      JSON.stringify({ runtimeSchema: 1, sqliteSchema: 1 }),
+    );
+    await writeFile(
+      path.join(f.dir, ".gitignore"),
+      "*.db*\nrelease.json\nlogs/\ninstalled.mjs\n",
+    );
+    await git(f.dir, ["init"]);
+    await git(f.dir, ["config", "user.name", "Test"]);
+    await git(f.dir, ["config", "user.email", "test@example.invalid"]);
+    await git(f.dir, ["add", "."]);
+    await git(f.dir, ["commit", "-m", "v1 source"]);
+    const source = await git(f.dir, ["rev-parse", "HEAD"]);
+    await writeFile(
+      policy,
+      JSON.stringify({
+        runtimeSchema: 1,
+        sqliteSchema: 4,
+        minimumUpdaterVersion: 2,
+      }),
+    );
+    await git(f.dir, ["commit", "-am", "v4 target"]);
+    const candidate = await git(f.dir, ["rev-parse", "HEAD"]);
+    await git(f.dir, ["checkout", "--detach", source]);
+    await writeFile(
+      path.join(f.dir, "release.json"),
+      JSON.stringify({ commit: source, runtimeSchema: 1, sqliteSchema: 1 }),
+    );
+    // Readiness uses the version marker; actual legacy migration is tested with
+    // a real minimal v1 database in updater tests.
+    f.store.db.exec("PRAGMA user_version=1");
+    const installedUpdaterFile = path.join(f.dir, "installed.mjs");
+    const options = {
+      releaseDir: f.dir,
+      installedUpdaterFile,
+      health: async () => ({
+        ok: true,
+        orchestratorOk: true,
+        availability: "ready",
+        tunnel: "ready",
+        checks: [],
+        release: source,
+        maintenance: false,
+        managed: true,
+        update: null,
+      }),
+    };
+    for (const version of [undefined, 1, 2]) {
+      if (version !== undefined)
+        await writeFile(
+          installedUpdaterFile,
+          `export const UPDATER_VERSION = ${version};\n`,
+        );
+      const result = await releasePreflight(f.core, candidate, options);
+      assert.equal(
+        result.ready,
+        version === 2,
+        JSON.stringify(result.blockers),
+      );
+      if (version !== 2)
+        assert.ok(
+          result.blockers.some((b) => b.code === "CANDIDATE_COMPATIBILITY"),
+        );
+      assert.equal(
+        f.store.db.prepare("PRAGMA user_version").get()!.user_version,
+        1,
+      );
+    }
+  } finally {
+    await f.cleanup();
+  }
+});

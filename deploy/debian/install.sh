@@ -4,7 +4,7 @@ set -eu
 [ "$(id -u)" -eq 0 ] || { echo 'Run as root on Debian' >&2; exit 1; }
 [ -f /etc/debian_version ] || exit 1
 cd "$(dirname "$0")/../.."
-for command in node git sudo systemctl visudo; do command -v "$command" >/dev/null; done
+for command in node git sudo systemctl visudo flock; do command -v "$command" >/dev/null; done
 /usr/bin/node -e 'if (+process.versions.node.split(".")[0] < 24) process.exit(1)'
 getent group codexbridge >/dev/null || groupadd --system codexbridge
 id codexbridge >/dev/null 2>&1 || useradd --system --gid codexbridge --home-dir /var/lib/codexbridge --shell /usr/sbin/nologin codexbridge
@@ -16,6 +16,7 @@ chown codexbridge:codexbridge /opt/codexbridge
 install -d -o root -g codexbridge -m 0750 /etc/codexbridge
 install -o root -g root -m 0755 deploy/debian/codexbridge-control /usr/local/sbin/codexbridge-control
 install -o root -g root -m 0644 scripts/self-update.mjs /usr/local/lib/codexbridge/self-update.mjs
+install -o root -g root -m 0644 scripts/legacy-bootstrap.mjs /usr/local/lib/codexbridge/legacy-bootstrap.mjs
 install -o root -g root -m 0644 scripts/initial-release.mjs /usr/local/lib/codexbridge/initial-release.mjs
 visudo -cf deploy/debian/sudoers
 install -o root -g root -m 0440 deploy/debian/sudoers /etc/sudoers.d/codexbridge

@@ -33,6 +33,11 @@ test("Debian units use fixed service identity, external state, boot and restart 
   }
   const main = await read("codexbridge.service");
   assert.match(main, /^Requires=codexbridge-recover.service$/m);
+  assert.match(main, /ExecStartPre=.*self-update.mjs --guard-start/);
+  assert.match(
+    main,
+    /ExecStart=\/usr\/bin\/node --import \/usr\/local\/lib\/codexbridge\/legacy-bootstrap.mjs/,
+  );
   // sudo remains usable for the tiny control wrapper, never general commands.
   assert.doesNotMatch(main, /^NoNewPrivileges=true$/m);
   const updater = await read("codexbridge-update.service");
@@ -67,6 +72,10 @@ test("root control wrapper and sudoers allow only exact verbs and fixed units", 
     /install -o root -g root -m 0755 deploy\/debian\/codexbridge-control/,
   );
   assert.match(install, /visudo -cf deploy\/debian\/sudoers/);
+  assert.match(
+    install,
+    /install -o root -g root -m 0644 scripts\/legacy-bootstrap.mjs \/usr\/local\/lib\/codexbridge\/legacy-bootstrap.mjs/,
+  );
   assert.match(install, /if \[ ! -e \/etc\/codexbridge\/environment \]/);
   assert.match(
     install,

@@ -331,7 +331,7 @@ test("real fetch pins the requested tag and validates isolated candidate before 
   );
   await assert.rejects(() => driver.build("not-a-real-ref"));
   assert.equal(validation.length, 3);
-  for (const minimumUpdaterVersion of [2, undefined, 0, "1", null]) {
+  for (const minimumUpdaterVersion of [3, undefined, 0, "1", null]) {
     await writeFile(
       path.join(repo, "deploy/debian/release-policy.json"),
       JSON.stringify({
@@ -671,10 +671,10 @@ test("preparation rejection, occupied maintenance and startup cleanup preserve a
     });
     await writeFile(f.maintenance, sentinel);
     await f.commitPolicy(f.old, { runtimeSchema: 1 });
-    await assert.rejects(transaction(f.driver, "main"), /schema-v4/);
+    await assert.rejects(transaction(f.driver, "main"), /maintenance/);
     assert.equal(await readFile(f.maintenance, "utf8"), sentinel);
     await f.commitPolicy(f.old, f.policy);
-    await assert.rejects(transaction(f.driver, "main"), /EEXIST/);
+    await assert.rejects(transaction(f.driver, "main"), /maintenance/);
     assert.equal(await readFile(f.maintenance, "utf8"), sentinel);
     await recover(f.driver, { phase: "prepared" });
     await recover(f.driver, undefined);
@@ -832,7 +832,7 @@ test("updater contract rejects unsupported, invalid and inconsistent metadata be
   try {
     for (const release of [f.old, f.candidate]) {
       for (const source of ["manifest", "policy", "committedPolicy"]) {
-        for (const required of [2, 0, -1, 1.5, "1", null, undefined]) {
+        for (const required of [3, 0, -1, 1.5, "1", null, undefined]) {
           const fields = { ...f.policy, minimumUpdaterVersion: required };
           if (source === "committedPolicy")
             await f.commitPolicy(release, fields);
@@ -970,11 +970,11 @@ test("v1 WAL state survives rejected activation; copying only the main DB loses 
     for (let attempt = 0; attempt < 2; attempt++) {
       await assert.rejects(
         transaction(f.driver, "main"),
-        /cross-schema activation is forbidden/,
+        /snapshot|contract 2/i,
       );
       await assert.rejects(
         f.driver.activate(f.candidate),
-        /cross-schema activation is forbidden/,
+        /snapshot|contract 2/i,
       );
       assert.equal(await realpath(f.current), f.old);
       for (const [index, name] of files.entries())
@@ -997,10 +997,7 @@ test("v1 WAL state survives rejected activation; copying only the main DB loses 
         migrated.db.prepare("SELECT value FROM settings").get()!.value,
         "keep",
       );
-      await assert.rejects(
-        f.driver.restore(f.old),
-        /cross-schema activation is forbidden/,
-      );
+      await assert.rejects(f.driver.restore(f.old), /snapshot|contract 2/i);
       assert.equal(
         migrated.db.prepare("PRAGMA user_version").get()!.user_version,
         4,
@@ -1042,7 +1039,7 @@ for (const phase of ["activating", "rollback_failed", "boot_pending_health"]) {
         fresh.restore = f.driver.restore;
         await assert.rejects(
           recover(fresh, state, boot),
-          /cross-schema activation is forbidden/,
+          /snapshot|contract 2/i,
         );
         assert.equal(await realpath(f.current), f.candidate);
         assert.deepEqual(
@@ -1088,3 +1085,515 @@ test("restore failure retains maintenance and recovery health failure never resu
   assert.equal(unhealthy.maintenance, true);
   assert.equal(unhealthy.events.includes("resume"), false);
 });
+
+async function coldFixture() {
+  const f = await compatibilityFixture();
+  const { rm } = await import("node:fs/promises");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  await f.commitPolicy(f.old, { runtimeSchema: 1, sqliteSchema: 1 });
+  await f.manifest(f.old, { runtimeSchema: 1, sqliteSchema: 1 } as any);
+  const target = { ...f.policy, minimumUpdaterVersion: 2 };
+  await f.commitPolicy(f.candidate, target);
+  await f.manifest(f.candidate, target);
+  const file = path.join(f.data, "codexbridge.db");
+  await rm(file);
+  // Process exit without SQLite close leaves committed data exclusively in WAL.
+  await promisify(execFile)(process.execPath, [
+    "--input-type=module",
+    "-e",
+    `
+    import { DatabaseSync } from 'node:sqlite';
+    const db = new DatabaseSync(${JSON.stringify(file)});
+    db.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE jobs (id TEXT PRIMARY KEY); CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); PRAGMA user_version=1; PRAGMA wal_checkpoint(TRUNCATE);');
+    db.prepare('INSERT INTO settings VALUES (?, ?)').run('queued-state', 'keep');
+    process.exit(0);
+  `,
+  ]);
+  const names = ["codexbridge.db", "codexbridge.db-wal", "codexbridge.db-shm"];
+  const before = await Promise.all(
+    names.map((n) => readFile(path.join(f.data, n))),
+  );
+  assert.ok(before[1].length > 0);
+  f.driver.stop = async () => {};
+  return { ...f, file, names, before };
+}
+
+test("cold v1 WAL snapshot restores exact bytes after real Store migration and failed candidate health", async () => {
+  const f = await coldFixture();
+  const { Store } = await import("../src/database.js");
+  const { DatabaseSync } = await import("node:sqlite");
+  const { rm, access } = await import("node:fs/promises");
+  const events: string[] = [];
+  const config = await readFile(path.join(f.data, "config.json"));
+  let previousHealthy = false;
+  f.driver.stop = async () => {
+    events.push("stopped");
+  };
+  const capture = f.driver.capture;
+  f.driver.capture = async (state: any) => {
+    assert.equal(events.at(-1), "stopped");
+    events.push("capture");
+    return capture(state);
+  };
+  f.driver.restart = async () => {
+    const release = await realpath(f.current);
+    if (release === f.candidate) {
+      const migrated = new Store(f.file);
+      assert.equal(
+        migrated.db.prepare("PRAGMA user_version").get()!.user_version,
+        4,
+      );
+      migrated.db
+        .prepare("UPDATE settings SET value='candidate mutation'")
+        .run();
+      migrated.close();
+    } else {
+      for (const [i, name] of f.names.entries())
+        assert.deepEqual(await readFile(path.join(f.data, name)), f.before[i]);
+      const old = new DatabaseSync(f.file);
+      assert.equal(old.prepare("PRAGMA user_version").get()!.user_version, 1);
+      assert.equal(
+        old.prepare("SELECT value FROM settings").get()!.value,
+        "keep",
+      );
+      assert.equal(
+        old
+          .prepare(
+            "SELECT count(*) AS n FROM sqlite_master WHERE name='roadmaps'",
+          )
+          .get()!.n,
+        0,
+      );
+      old.close();
+      previousHealthy = true;
+    }
+  };
+  f.driver.health = async (release: string) => {
+    if (release === f.candidate)
+      throw Error("candidate unhealthy after migration");
+    assert.ok(previousHealthy);
+    return { orchestratorOk: true };
+  };
+  try {
+    await assert.rejects(transaction(f.driver, "main"), /candidate unhealthy/);
+    assert.equal(await realpath(f.current), f.old);
+    assert.equal(
+      JSON.parse(
+        await readFile(path.join(f.data, "update-status.json"), "utf8"),
+      ).phase,
+      "rolled_back",
+    );
+    assert.deepEqual(await readFile(path.join(f.data, "config.json")), config);
+    await assert.rejects(access(path.join(f.data, "rollback-snapshot")));
+    await assert.rejects(access(f.maintenance));
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("successful v4 activation commits health before retiring snapshot", async () => {
+  const f = await coldFixture();
+  const { Store } = await import("../src/database.js");
+  const { rm, access } = await import("node:fs/promises");
+  f.driver.restart = async () => {
+    new Store(f.file).close();
+  };
+  f.driver.health = async () => {
+    await access(path.join(f.data, "rollback-snapshot", "manifest.json"));
+    return { orchestratorOk: true };
+  };
+  try {
+    await transaction(f.driver, "main");
+    assert.equal(await realpath(f.current), f.candidate);
+    await assert.rejects(access(path.join(f.data, "rollback-snapshot")));
+    await assert.rejects(access(f.maintenance));
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+for (const corruption of [
+  "missing",
+  "manifest",
+  "database",
+  "wrong-id",
+  "wrong-owner",
+]) {
+  test(`cold recovery fails closed on ${corruption} evidence`, async () => {
+    const f = await coldFixture();
+    const { rm } = await import("node:fs/promises");
+    const { randomUUID } = await import("node:crypto");
+    const state: any = {
+      id: randomUUID(),
+      cold: true,
+      phase: "activating",
+      previous: f.old,
+      candidate: f.candidate,
+    };
+    try {
+      await f.driver.save(state);
+      await f.driver.quiesce();
+      state.snapshotHash = await f.driver.capture(state);
+      const dir = path.join(f.data, "rollback-snapshot");
+      if (corruption === "missing") await rm(path.join(dir, "manifest.json"));
+      if (corruption === "manifest")
+        await writeFile(path.join(dir, "manifest.json"), "{}");
+      if (corruption === "database")
+        await writeFile(path.join(dir, "codexbridge.db"), "corrupt");
+      if (corruption === "wrong-id") {
+        state.id = randomUUID();
+        // Matching maintenance must not let a different transaction borrow the
+        // original manifest and its valid hash.
+        await writeFile(
+          f.maintenance,
+          JSON.stringify({
+            owner: "codexbridge-update",
+            reason: "self-update",
+            id: state.id,
+          }),
+        );
+      }
+      if (corruption === "wrong-owner")
+        await writeFile(
+          f.maintenance,
+          JSON.stringify({
+            owner: "codexbridge-update",
+            reason: "self-update",
+            id: randomUUID(),
+          }),
+        );
+      let restarted = false;
+      f.driver.restart = async () => {
+        restarted = true;
+      };
+      await assert.rejects(
+        recover(f.driver, state, true),
+        /integrity|ENOENT|transaction|another operation/,
+      );
+      assert.equal(restarted, false);
+      for (const [i, name] of f.names.entries())
+        assert.deepEqual(await readFile(path.join(f.data, name)), f.before[i]);
+      assert.ok(await readFile(f.maintenance));
+    } finally {
+      await rm(f.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const boundary of [
+  "codexbridge.db",
+  "codexbridge.db-wal",
+  "codexbridge.db-shm",
+]) {
+  test(`process death after restoring ${boundary} is repeatable from immutable snapshot`, async () => {
+    const f = await coldFixture();
+    const { Store } = await import("../src/database.js");
+    const { rm } = await import("node:fs/promises");
+    const { randomUUID } = await import("node:crypto");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const state: any = {
+      id: randomUUID(),
+      cold: true,
+      phase: "restoring",
+      previous: f.old,
+      candidate: f.candidate,
+    };
+    try {
+      await f.driver.save(state);
+      await f.driver.quiesce();
+      state.snapshotHash = await f.driver.capture(state);
+      new Store(f.file).close();
+      await f.driver.save(state);
+      await assert.rejects(
+        promisify(execFile)(process.execPath, [
+          "--input-type=module",
+          "-e",
+          `
+        import { restoreSnapshot } from ${JSON.stringify(new URL("../scripts/self-update.mjs", import.meta.url).href)};
+        await restoreSnapshot(${JSON.stringify(f.data)}, ${JSON.stringify(state)}, undefined,
+          async name => { if (name === ${JSON.stringify(boundary)}) process.exit(73); });
+      `,
+        ]),
+        (e: any) => e.code === 73,
+      );
+      await recover(f.driver, state, true);
+      for (const [i, name] of f.names.entries())
+        assert.deepEqual(await readFile(path.join(f.data, name)), f.before[i]);
+      const pending = JSON.parse(
+        await readFile(path.join(f.data, "update-status.json"), "utf8"),
+      );
+      assert.equal(pending.phase, "boot_pending_health");
+      await verifyRecovery(f.driver, pending);
+      await assert.rejects(readFile(f.maintenance));
+    } finally {
+      await rm(f.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const fault of [
+  "before-owner",
+  "owner-synced",
+  "owner-published",
+  "snapshotting",
+  "files-synced",
+  "manifest-synced",
+  "activating",
+  "switched",
+  "migrated",
+  "completed",
+]) {
+  test(`cold transaction recovers process death at ${fault}`, async () => {
+    const f = await coldFixture();
+    const { rm } = await import("node:fs/promises");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const { DatabaseSync } = await import("node:sqlite");
+    const script = `
+      import { makeDriver, transaction, captureSnapshot } from ${JSON.stringify(new URL("../scripts/self-update.mjs", import.meta.url).href)};
+      import { readFile } from 'node:fs/promises';
+      import { DatabaseSync } from 'node:sqlite';
+      const fault = ${JSON.stringify(fault)};
+      const die = name => { if (name === fault) process.exit(73); };
+      const d = await makeDriver(${JSON.stringify(f.root)}, ${JSON.stringify(f.data)}, {}, undefined,
+        async () => Response.json(${JSON.stringify(idleStatus)}));
+      d.build = async () => ${JSON.stringify(f.candidate)};
+      d.stop = async () => {};
+      const save = d.save, activate = d.activate;
+      d.save = async s => { await save(s); die(s.phase); };
+      d.capture = async s => captureSnapshot(${JSON.stringify(f.data)}, s,
+        JSON.parse(await readFile(${JSON.stringify(path.join(f.old, "release.json"))}, 'utf8')), async name => die(name));
+      d.activate = async (...args) => { await activate(...args); die('switched'); };
+      d.restart = async () => {
+        const db = new DatabaseSync(${JSON.stringify(f.file)});
+        db.exec("PRAGMA user_version=4; UPDATE settings SET value='migrated';"); db.close(); die('migrated');
+      };
+      d.health = async () => ({ orchestratorOk: true });
+      await transaction(d, 'main');
+    `;
+    try {
+      await assert.rejects(
+        promisify(execFile)(process.execPath, [
+          "--input-type=module",
+          "-e",
+          script,
+        ]),
+        (e: any) => e.code === 73,
+      );
+      const state = JSON.parse(
+        await readFile(path.join(f.data, "update-status.json"), "utf8"),
+      );
+      const { makeDriver } = await import("../scripts/self-update.mjs");
+      const fresh = await makeDriver(f.root, f.data, {});
+      fresh.stop = async () => {};
+      fresh.health = async () => ({ orchestratorOk: true });
+      await recover(fresh, state, true);
+      const recovered = JSON.parse(
+        await readFile(path.join(f.data, "update-status.json"), "utf8"),
+      );
+      if (fault !== "completed") {
+        assert.equal(recovered.phase, "boot_pending_health");
+        assert.equal(await realpath(f.current), f.old);
+        await verifyRecovery(fresh, recovered);
+      }
+      const db = new DatabaseSync(f.file);
+      assert.equal(
+        db.prepare("PRAGMA user_version").get()!.user_version,
+        fault === "completed" ? 4 : 1,
+      );
+      assert.equal(
+        db.prepare("SELECT value FROM settings").get()!.value,
+        fault === "completed" ? "migrated" : "keep",
+      );
+      db.close();
+      await assert.rejects(readFile(f.maintenance));
+      await assert.rejects(
+        readFile(path.join(f.data, "rollback-snapshot", "manifest.json")),
+      );
+      // A recovered initialization must not poison the single snapshot slot.
+      if (["before-owner", "owner-synced", "owner-published"].includes(fault)) {
+        assert.equal((await transaction(f.driver, "main")).phase, "completed");
+      }
+    } finally {
+      await rm(f.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("cold stop requires installed startup guard and exited service processes", async () => {
+  const { makeDriver } = await import("../scripts/self-update.mjs");
+  const f = await compatibilityFixture();
+  const { rm } = await import("node:fs/promises");
+  try {
+    for (const response of [
+      "active\n42\n0\ninactive\n0\n0",
+      "inactive\n0\n0",
+      "inactive\n0\n0\ninactive\n0\n0",
+    ]) {
+      const commands: string[][] = [];
+      const driver = await makeDriver(
+        f.root,
+        f.data,
+        {},
+        async (cmd: string, args: string[]) => {
+          commands.push([cmd, ...args]);
+          return {
+            stdout: args.includes("--property=ExecStartPre")
+              ? "/usr/local/lib/codexbridge/self-update.mjs --guard-start"
+              : args.includes("--property=ExecStart")
+                ? "/usr/bin/node --import /usr/local/lib/codexbridge/legacy-bootstrap.mjs /opt/codexbridge/current/dist/cli.js start"
+                : response,
+          };
+        },
+      );
+      if (response.split("\n").length === 6 && !response.includes("42"))
+        await driver.stop(true);
+      else await assert.rejects(driver.stop(true), /stopped services/);
+      assert.ok(commands.every((c) => c[0] === "/usr/bin/systemctl"));
+    }
+    const driver = await makeDriver(f.root, f.data, {}, async () => ({
+      stdout: "",
+    }));
+    await assert.rejects(driver.stop(), /startup guard/);
+    const guardOnly = await makeDriver(f.root, f.data, {}, async () => ({
+      stdout: "/usr/local/lib/codexbridge/self-update.mjs --guard-start",
+    }));
+    await assert.rejects(guardOnly.stop(true), /legacy bootstrap/);
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("startup guard blocks incomplete/restoring/ambiguous state and validates snapshot before opening Store", async () => {
+  const { guardStart } = await import("../scripts/self-update.mjs");
+  const { randomUUID } = await import("node:crypto");
+  const { rm } = await import("node:fs/promises");
+  const f = await coldFixture();
+  const state: any = {
+    cold: true,
+    id: randomUUID(),
+    previous: f.old,
+    candidate: f.candidate,
+  };
+  try {
+    for (const phase of [
+      "snapshotting",
+      "restoring",
+      "rollback_failed",
+      "unknown",
+    ])
+      await assert.rejects(
+        guardStart(f.data, { ...state, phase }),
+        /prohibits/,
+      );
+    for (const phase of ["activating", "boot_pending_health"])
+      await assert.rejects(guardStart(f.data, { ...state, phase }), /ENOENT/);
+    state.snapshotHash = await f.driver.capture(state);
+    await guardStart(f.data, { ...state, phase: "activating" });
+    await guardStart(f.data, { ...state, phase: "boot_pending_health" });
+    await writeFile(
+      path.join(f.data, "rollback-snapshot", "codexbridge.db-wal"),
+      "corrupt",
+    );
+    await assert.rejects(
+      guardStart(f.data, { ...state, phase: "activating" }),
+      /integrity/,
+    );
+    await assert.rejects(
+      recover(f.driver, { ...state, phase: "unknown" }),
+      /Ambiguous/,
+    );
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("absent source sidecars are removed during rollback; orphan snapshots block startup and new transactions", async () => {
+  const f = await coldFixture();
+  const { DatabaseSync } = await import("node:sqlite");
+  const { randomUUID } = await import("node:crypto");
+  const { rm } = await import("node:fs/promises");
+  const { restoreSnapshot, guardStart } =
+    await import("../scripts/self-update.mjs");
+  const state: any = {
+    cold: true,
+    id: randomUUID(),
+    previous: f.old,
+    candidate: f.candidate,
+  };
+  try {
+    const checkpoint = new DatabaseSync(f.file);
+    checkpoint.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    checkpoint.close();
+    state.snapshotHash = await f.driver.capture(state);
+    await writeFile(f.file + "-wal", "candidate wal");
+    await writeFile(f.file + "-shm", "candidate shm");
+    await restoreSnapshot(f.data, state);
+    await assert.rejects(readFile(f.file + "-wal"));
+    await assert.rejects(readFile(f.file + "-shm"));
+    await assert.rejects(
+      guardStart(f.data, undefined),
+      /without its transaction/,
+    );
+    await assert.rejects(
+      recover(f.driver, undefined, true),
+      /without its transaction/,
+    );
+    await assert.rejects(
+      transaction(f.driver, "main"),
+      /without its transaction/,
+    );
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+for (const fault of [
+  "discard-published",
+  "discard-owner-removed",
+  "discard-removed",
+]) {
+  test(`process death during ${fault} cleanup is recoverable and permits another transaction`, async () => {
+    const f = await coldFixture();
+    const { randomUUID } = await import("node:crypto");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const { rm, readdir } = await import("node:fs/promises");
+    const state: any = {
+      cold: true,
+      id: randomUUID(),
+      phase: "rolled_back",
+      previous: f.old,
+      candidate: f.candidate,
+    };
+    try {
+      await f.driver.save(state);
+      state.snapshotHash = await f.driver.capture(state);
+      await f.driver.save(state);
+      await assert.rejects(
+        promisify(execFile)(process.execPath, [
+          "--input-type=module",
+          "-e",
+          `
+        import { cleanupSnapshot } from ${JSON.stringify(new URL("../scripts/self-update.mjs", import.meta.url).href)};
+        await cleanupSnapshot(${JSON.stringify(f.data)}, ${JSON.stringify(state)},
+          async phase => { if (phase === ${JSON.stringify(fault)}) process.exit(73); });
+      `,
+        ]),
+        (e: any) => e.code === 73,
+      );
+      await recover(f.driver, state, true);
+      assert.equal(
+        (await readdir(f.data)).some((name) =>
+          name.startsWith("rollback-snapshot"),
+        ),
+        false,
+      );
+      assert.equal((await transaction(f.driver, "main")).phase, "completed");
+    } finally {
+      await rm(f.dir, { recursive: true, force: true });
+    }
+  });
+}

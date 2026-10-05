@@ -14,7 +14,8 @@ Environment=CODEX_HOME=/var/lib/codexbridge/codex
 Environment=CODEXBRIDGE_HOME=/var/lib/codexbridge
 Environment=CODEXBRIDGE_MANAGED=1
 EnvironmentFile=/etc/codexbridge/environment
-ExecStart=/usr/bin/node /opt/codexbridge/current/dist/cli.js start
+ExecStartPre=/usr/bin/node /usr/local/lib/codexbridge/self-update.mjs --guard-start
+ExecStart=/usr/bin/node --import /usr/local/lib/codexbridge/legacy-bootstrap.mjs /opt/codexbridge/current/dist/cli.js start
 Restart=always
 RestartSec=5
 TimeoutStopSec=90

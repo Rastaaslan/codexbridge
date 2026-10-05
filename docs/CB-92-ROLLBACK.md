@@ -1,5 +1,7 @@
 # CB-92 cross-schema rollback decision
 
+Historical decision, superseded by [CB-134 contract 2](CB-134-ROLLBACK.md).
+
 Reviewed base: `9058f0c4498a8fff118c83265e260d9834cdad74`.
 
 **Keep v1 → v4 self-update forbidden.** Updater contract 1 cannot establish

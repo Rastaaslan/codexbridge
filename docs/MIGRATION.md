@@ -71,7 +71,9 @@ from mocked tunnel contract tests.
 
 `deploy/debian/release-policy.json` declares `minimumUpdaterVersion`, a positive
 integer copied into generated `release.json`. The invoking root-owned runner
-has its own `UPDATER_VERSION` constant; candidate code cannot raise it. Version 1
+has its own `UPDATER_VERSION` constant; candidate code cannot raise it. Version 2
+adds the [cold v1 → v4 snapshot/restore transaction](CB-134-ROLLBACK.md),
+requiring the matching service startup guard and Debian flock. Version 1
 covers schema-v4 validation, degraded-tunnel health, target-only restoration and
 atomic maintenance publication. Increment the contract version when a release
 needs new activation/recovery behavior, and raise that release's minimum.
@@ -83,7 +85,9 @@ supported requirement before switching `current`; transaction validation happens
 before maintenance. Restoration checks the target using the same contract.
 Legacy schema-v4 rollback targets may omit the requirement only when all three
 metadata sources omit it. New candidates must declare it. Runtime/SQLite schema
-checks and cross-version rollback blocking still apply independently.
+checks still apply independently. Cross-schema activation requires a verified
+v1 source, a contract-2 candidate and the installed contract-2 runner/wiring;
+missing snapshot evidence always blocks v1 restoration.
 
 Older installed runners that predate this gate ignore the new field. They must
 be replaced administratively **before requesting a release using this contract**;
@@ -118,3 +122,23 @@ node --input-type=module -e 'import { readFile } from "node:fs/promises"; import
 Use the same pinned commit for the subsequent release request. These instructions
 are a future deployment procedure; CB-82 does not install a runner, invoke the
 installer or change any production service.
+
+For contract 2, replacing the runner alone is insufficient. In the same reviewed
+administrator window, install the matching `deploy/debian/codexbridge.service`
+with its `ExecStartPre ... --guard-start` line, reload systemd's unit definitions,
+and verify the loaded `ExecStartPre` and `/usr/bin/flock` availability before
+requesting an update. Keep the existing boot recovery and post-start health units
+installed and enabled. The cold-stop gate refuses activation if the loaded unit
+lacks the startup guard. CB-134 edits these installation sources only; it performs
+none of these production operations.
+
+The actual deployed legacy release `3a99deafb510a893e607204f3add8805599c69e7`
+has no sqliteSchema policy field and no operational_summary endpoint. Contract 2
+supports it only through the [exact-source bootstrap](CB-134-ROLLBACK.md#exact-deployed-source-bootstrap):
+install the root-owned `legacy-bootstrap.mjs` alongside `self-update.mjs`, and
+include the matching service `--import` hook. Original source metadata must not
+be edited to pretend compatibility. Use the installed runner's read-only
+`--bootstrap-preflight` on that original release; do not open the candidate Store
+for preflight. The separate administrator procedure first boots the same v1
+release with instrumentation under maintenance. It is not part of the application
+self-update and has not been performed by this job.
