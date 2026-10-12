@@ -31,6 +31,8 @@ export interface ExecutionPorts {
   // Must resolve actual canonical Git path/ref/commit and hash trusted source
   // provenance, including compatibility. No policy-derived echo verifier.
   verifySource(grant: ExecutionGrant): Promise<boolean>;
+  // Optional protected revocation check at the synchronous insertion boundary.
+  revalidateGrant?(grant: ExecutionGrant): boolean;
   schedulerAllows(repository: string): boolean;
   // MUST invoke guard synchronously at insertion, after any async preparation.
   create(input: unknown, beforeCreate: () => undefined): Promise<Job>;
@@ -334,7 +336,8 @@ export class SentinelExecutor {
         if (
           !this.options.enabled ||
           this.options.dryRun ||
-          grant.expiresAt <= this.now()
+          grant.expiresAt <= this.now() ||
+          (this.ports.revalidateGrant && !this.ports.revalidateGrant(grant))
         )
           throw new Blocker(
             "Task authorization expired or execution disabled before insertion",

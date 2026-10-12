@@ -13,6 +13,7 @@ export interface SentinelHost {
   authorize: ExecutionPorts["authorize"];
   verifySource: ExecutionPorts["verifySource"];
   schedulerAllows: ExecutionPorts["schedulerAllows"];
+  revalidateGrant?: ExecutionPorts["revalidateGrant"];
   now?: () => number;
 }
 
@@ -39,6 +40,7 @@ export class SentinelDispatch {
       {
         authorize: host.authorize,
         verifySource: host.verifySource,
+        revalidateGrant: host.revalidateGrant,
         schedulerAllows: (repository) =>
           !this.stopped && host.schedulerAllows(repository),
         create: coreCreatePort(core),
