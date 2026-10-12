@@ -24,7 +24,7 @@ export interface SentinelPolicy {
   evaluate(event: Readonly<Attention>): Readonly<{
     kind: "ignore" | "recommend";
     reason: string;
-    requiresHumanAuthorization: "[REDACTED]"
+    requiresHumanAuthorization: true
   }>;
 }
 

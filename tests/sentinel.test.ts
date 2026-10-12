@@ -51,7 +51,7 @@ test("event-driven summaries preserve transitions, sanitize details, ignore toke
   });
   const j = job(store);
   store.transition(j.id, "FAILED", {
-    blocker: "password="[REDACTED]" inspect",
+    blocker: 'password="synthetic-private-value" inspect',
   });
   await Promise.resolve();
   t.mock.timers.tick(1000);

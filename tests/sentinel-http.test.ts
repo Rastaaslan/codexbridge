@@ -85,7 +85,7 @@ test(
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...(authorization ? { Authorization: "[REDACTED]" } : {}),
+            ...(authorization ? { Authorization: authorization } : {}),
           },
           body: "{}",
           signal: AbortSignal.timeout(2000),
@@ -106,7 +106,7 @@ test(
     const disabled = await open("disabled");
     assert.equal((await disabled.request()).status, 401);
     assert.equal(
-      (await disabled.request("[REDACTED]")).status,
+      (await disabled.request("Bearer intentionally-invalid-token")).status,
       401,
     );
     const off = await disabled.read();
@@ -132,7 +132,7 @@ test(
       }),
     );
     enabled.store.transition(job.id, "FAILED", {
-      blocker: "password="[REDACTED]",
+      blocker: 'password="synthetic-private-value"',
     });
     const jobBefore = enabled.store.get(job.id);
     const eventsBefore = enabled.store.events(job.id);
