@@ -1,0 +1,27 @@
+{
+  "id": "worldprep-dev-v1",
+  "enabled": false,
+  "repository": "UNVERIFIED_WORLDPrep_REPOSITORY",
+  "source": null,
+  "budget": 1,
+  "concurrency": 1,
+  "cooldownMs": 3600000,
+  "tasks": [
+    {
+      "id": "worldprep-followup",
+      "operation": "code-fix",
+      "dependencies": [
+        "CB-187",
+        "CB-188",
+        "CB-186"
+      ],
+      "requiredEvidence": [
+        "worldprep-runtime-validation",
+        "director-runtime-validation"
+      ],
+      "ticket": "Code/debug only: investigate a bounded WorldPrep development fix after workflow completion and verified runtime evidence. No world generation, runtime integration, deployment or human-test approval. Mechanical checks use the service without LLM.",
+      "ticketHash": "8b30e72bf1dd3d53fa93e34feabdb72fde94f0ffa0d9ce1172a0f179ddc4860e"
+    }
+  ]
+}
+

@@ -1,0 +1,27 @@
+name: Sentinel isolated integration
+on:
+  push:
+    branches: [sentinel/cb191-wired-20261012]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sentinel-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Existing TypeScript and test suite
+        run: npm run check
+      - name: Disposable Git and HTTP smoke tests
+        env:
+          SENTINEL_DISPATCH_GIT_TEST: '1'
+          SENTINEL_EXECUTOR_GIT_TEST: '1'
+          CODEXBRIDGE_TEST_SENTINEL_HTTP: '1'
+          TSX_DISABLE_CACHE: '1'
+        run: node --import tsx --test --test-isolation=none --test-concurrency=1 tests/sentinel-http.test.ts tests/sentinel-dispatch.test.ts tests/sentinel-executor.test.ts
