@@ -19,14 +19,14 @@ jobs:
       - name: Compile TypeScript
         run: npm run build
       - name: Targeted Sentinel tests
-        run: TSX_DISABLE_CACHE=1 node --import tsx --test --test-isolation=none --test-concurrency=1 tests/sentinel.test.ts tests/sentinel-dev.test.ts tests/sentinel-executor.test.ts tests/sentinel-dispatch.test.ts tests/sentinel-trust.test.ts
+        run: TSX_DISABLE_CACHE=1 node --import tsx --test --test-isolation=none --test-concurrency=1 tests/sentinel.test.ts tests/sentinel-dev.test.ts tests/sentinel-executor.test.ts tests/sentinel-dispatch.test.ts tests/sentinel-trust.test.ts tests/sentinel-operator-host.test.ts
       - name: Disposable Git and HTTP smoke tests
         env:
           SENTINEL_DISPATCH_GIT_TEST: '1'
           SENTINEL_EXECUTOR_GIT_TEST: '1'
           CODEXBRIDGE_TEST_SENTINEL_HTTP: '1'
           TSX_DISABLE_CACHE: '1'
-        run: node --import tsx --test --test-isolation=none --test-concurrency=1 tests/sentinel-http.test.ts tests/sentinel-dispatch.test.ts tests/sentinel-trust.test.ts tests/sentinel-executor.test.ts
+        run: node --import tsx --test --test-isolation=none --test-concurrency=1 tests/sentinel-http.test.ts tests/sentinel-dispatch.test.ts tests/sentinel-trust.test.ts tests/sentinel-operator-host.test.ts tests/sentinel-executor.test.ts
 
   sentinel-windows-targeted:
     runs-on: windows-latest
@@ -40,4 +40,4 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Sentinel targeted Windows regression
-        run: node --import tsx --test --test-isolation=none --test-concurrency=1 tests/sentinel.test.ts tests/sentinel-dev.test.ts tests/sentinel-executor.test.ts tests/sentinel-dispatch.test.ts tests/sentinel-trust.test.ts
+        run: node --import tsx --test --test-isolation=none --test-concurrency=1 tests/sentinel.test.ts tests/sentinel-dev.test.ts tests/sentinel-executor.test.ts tests/sentinel-dispatch.test.ts tests/sentinel-trust.test.ts tests/sentinel-operator-host.test.ts

@@ -467,6 +467,22 @@ test("Git verifier rejects canonical path, ref, commit and provenance mismatches
   );
 });
 
+test("temporary scheduler pressure defers and rechecks without restarting the executor", async (t) => {
+  const f = fixture(t);
+  const executor = f.make();
+  f.ports.schedulerAllows = () => false;
+  const deferred = await executor.run("fix1");
+  assert.match(deferred.blocker!, /temporarily unavailable/);
+  assert.equal(executor.isHalted, false);
+  assert.equal(f.calls(), 0);
+  assert.equal(executor.deferredUntil, 160000);
+  f.ports.schedulerAllows = () => true;
+  f.advance();
+  const completed = await executor.run("fix1");
+  assert.equal(completed.attempts.length, 1);
+  assert.equal(f.calls(), 1);
+});
+
 test("budget exhausted and scheduler refusal cannot submit", async (t) => {
   const f = fixture(t);
   f.p.budget = 1;

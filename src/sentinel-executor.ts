@@ -213,7 +213,7 @@ export class SentinelExecutor {
       throw new Blocker("Task authorization expired during verification");
     this.dependencies(taskId);
     if (!this.ports.schedulerAllows(p.repository))
-      throw new Blocker("Canonical scheduler admission blocked");
+      throw new Deferral("Canonical scheduler admission temporarily unavailable", this.now() + 60000);
     this.planner.tick();
     const report = this.planner.report();
     if (
@@ -371,7 +371,10 @@ export class SentinelExecutor {
       this.blocker = safe
         ? error.message
         : `${stage} failed; operator inspection required`;
-      this.halted = !(error instanceof Deferral && stage === "reservation");
+      this.halted = !(
+        error instanceof Deferral &&
+        (stage === "reservation" || stage === "authorization")
+      );
       if (!this.halted && error instanceof Deferral)
         this.deferredUntil = error.wakeAt;
     } finally {
