@@ -191,6 +191,10 @@ export class SentinelExecutor {
       throw new Blocker(
         "Disabled task, missing source or repository not allowlisted",
       );
+    // Reject resource pressure before reading grants or performing Git IO.
+    // Recheck again after verification and at the insertion boundary.
+    if (!this.ports.schedulerAllows(p.repository))
+      throw new Deferral("Canonical scheduler admission temporarily unavailable", this.now() + 60000);
     const grant = executionGrantSchema.safeParse(
       await this.ports.authorize(taskId),
     );

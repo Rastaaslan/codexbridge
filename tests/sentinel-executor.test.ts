@@ -467,6 +467,35 @@ test("Git verifier rejects canonical path, ref, commit and provenance mismatches
   );
 });
 
+test("resource deferral skips authorization and Git before rechecking", async (t) => {
+  const f = fixture(t);
+  const service = f.make();
+  let authorizations = 0;
+  let verifications = 0;
+  const previousAuthorize = f.ports.authorize;
+  const previousVerify = f.ports.verifySource;
+  f.ports.authorize = async (taskId) => {
+    authorizations++;
+    return previousAuthorize(taskId);
+  };
+  f.ports.verifySource = async (grant) => {
+    verifications++;
+    return previousVerify(grant);
+  };
+  f.ports.schedulerAllows = () => false;
+  await service.run("fix1");
+  assert.equal(service.isHalted, false);
+  assert.equal(authorizations, 0);
+  assert.equal(verifications, 0);
+  assert.equal(f.calls(), 0);
+  f.ports.schedulerAllows = () => true;
+  f.advance();
+  await service.run("fix1");
+  assert.equal(f.calls(), 1);
+  assert.ok(authorizations >= 1);
+  assert.ok(verifications >= 1);
+});
+
 test("temporary scheduler pressure defers and rechecks without restarting the executor", async (t) => {
   const f = fixture(t);
   const executor = f.make();
