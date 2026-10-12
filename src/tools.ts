@@ -1,3 +1,5 @@
+import { executionReportSchema } from "./sentinel-executor.js";
+import { devReportSchema } from "./sentinel-dev.js";
 import {
   operationalSummary,
   operationalSchema,
@@ -15,6 +17,7 @@ import {
 } from "./planner.js";
 import { integrationInputSchema, integrationSchema } from "./integration.js";
 import { z } from "zod";
+import { sentinelReportSchema } from "./sentinel.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   schedulerSchema,
@@ -68,6 +71,44 @@ export function toolDefinitions(
     readOnly: boolean;
     run: (a: any) => Promise<any>;
   }[] = [
+    {
+      name: "get_sentinel_dev_actions",
+      description:
+        "Read guarded development action reservations and blockers; never executes or reconciles jobs.",
+      input: z.strictObject({}),
+      output: executionReportSchema,
+      readOnly: true,
+      run: async () =>
+        (core.sentinelExecutionBlocker
+          ? {
+              mode: "disabled",
+              blocker: core.sentinelExecutionBlocker,
+              attempts: [],
+            }
+          : core.sentinelExecutor?.report()) ?? {
+          mode: "disabled",
+          blocker: null,
+          attempts: [],
+        },
+    },
+    {
+      name: "get_sentinel_dev",
+      description:
+        "Read default-off development lane plans and evidence blockers; never executes actions.",
+      input: z.strictObject({}),
+      output: devReportSchema,
+      readOnly: true,
+      run: async () => core.sentinelDev.report(),
+    },
+    {
+      name: "get_sentinel",
+      description:
+        "Read Sentinel Mini observation status and up to 100 recent lifecycle summaries. Never performs actions.",
+      input: z.strictObject({}),
+      output: sentinelReportSchema,
+      readOnly: true,
+      run: async () => core.sentinel.report(),
+    },
     {
       name: "get_scheduler",
       description:

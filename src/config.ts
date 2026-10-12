@@ -1,3 +1,4 @@
+import { devPolicySchema } from "./sentinel-dev.js";
 import "dotenv/config";
 import {
   existsSync,
@@ -12,6 +13,9 @@ import { z } from "zod";
 
 export const configSchema = z.strictObject({
   dataDir: z.string(),
+  sentinelExecutionEnabled: z.boolean().default(false),
+  sentinelEnabled: z.boolean().default(false),
+  sentinelDevPolicy: devPolicySchema.optional(),
   host: z.string().default("127.0.0.1"),
   port: z.number().int().min(1).max(65535).default(3847),
   repositoryRoots: z.array(z.string()).default([]),

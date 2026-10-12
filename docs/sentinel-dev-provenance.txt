@@ -1,0 +1,13 @@
+Source: /var/lib/codexbridge/worktrees/CB-189
+Branch: codexbridge/CB-189 (uncommitted accepted patch)
+Source and destination HEAD: d9eb49dafce6d86eccc7457a80139a6d2b106f7e
+All eight files copied byte-for-byte before V1 wiring edits.
+792c305d068c4242dd2d5bbca86c4c6bcd9ff6208e3761fda962cfbb9b86ed64  src/config.ts
+606fcd28c3bf826ae6daf86512335ddcf8b12ff99a92a72ce32c53468b41f68b  src/orchestrator.ts
+a882026442a053351a92d4f5c130ad5b455b9837cfd15fa7d75e60aa9e7fd2fd  src/tools.ts
+fe648cd95b839e4b17c181663ba4c2ccaf5732b024bca15516f89699af6d2442  src/sentinel.ts
+69bf1884983d26c99e3d3c6acc4db1f5309d0e65a5bbe437092bfe7d15e558d0  tests/sentinel.test.ts
+fed3684e7a507b195fa7813bd9b22b3f7d938e345d887c60c192a0169aa95286  tests/sentinel-http.test.ts
+2c34ee6cb094dd2e8e20281a6d68d236c6c20eda40790a5ddc16e899e1b7711a  docs/sentinel-mini.md
+ac883a31158c4aabd415b1f513c48c792f0932f6d73a20fbda53cf8535c68ca1  docs/sentinel-integration-readiness.md
+

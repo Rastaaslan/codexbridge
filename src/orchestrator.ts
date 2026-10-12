@@ -1,4 +1,8 @@
+import { SentinelDispatch, type SentinelHost } from "./sentinel-dispatch.js";
+import type { SentinelExecutor } from "./sentinel-executor.js";
+import { SentinelDev } from "./sentinel-dev.js";
 import { Planner } from "./planner.js";
+import { SentinelMini } from "./sentinel.js";
 import { Integration } from "./integration.js";
 import type { Config } from "./config.js";
 import { Store } from "./database.js";
@@ -30,6 +34,12 @@ export function alive(pid: number | null) {
   }
 }
 export class Orchestrator {
+  // Operator-only injected host; ordinary application construction stays inert.
+  readonly sentinelDispatch?: SentinelDispatch;
+  sentinelExecutionBlocker: string | null = null;
+  sentinelExecutor?: SentinelExecutor;
+  readonly sentinel: SentinelMini;
+  readonly sentinelDev: SentinelDev;
   readonly integration: Integration;
   readonly planner: Planner;
   restarting = false;
@@ -47,11 +57,44 @@ export class Orchestrator {
     readonly git: GitWorkspace,
     private adapter: CodexAdapter,
     private reviewer: Reviewer,
+    sentinelHost?: SentinelHost,
   ) {
     this.integration = new Integration(config, store, git);
     this.planner = new Planner(store, git, this.integration);
     this.log = logger(config.dataDir);
+    this.sentinel = new SentinelMini(store, config.sentinelEnabled);
+    this.sentinelDev = new SentinelDev(
+      store,
+      this.sentinel,
+      config.sentinelDevPolicy,
+    );
+    if (config.sentinelExecutionEnabled) {
+      if (
+        !sentinelHost ||
+        typeof sentinelHost.authorize !== "function" ||
+        typeof sentinelHost.verifySource !== "function" ||
+        typeof sentinelHost.schedulerAllows !== "function" ||
+        !Array.isArray(sentinelHost.repositories) ||
+        !config.sentinelEnabled ||
+        !config.sentinelDevPolicy?.enabled
+      )
+        this.sentinelExecutionBlocker =
+          "Execution disabled: protected host services and enabled observer/policy required";
+      else if (config.maxRuntimeRetries !== 0)
+        this.sentinelExecutionBlocker =
+          "Execution disabled: automatic runtime retries must be disabled";
+      else {
+        try {
+          this.sentinelDispatch = new SentinelDispatch(this, sentinelHost);
+          this.sentinelExecutor = this.sentinelDispatch.executor;
+        } catch {
+          this.sentinelExecutionBlocker =
+            "Execution disabled: protected host initialization failed";
+        }
+      }
+    }
     store.on("event", (jobId: string, type: string) => {
+      this.sentinelDispatch?.notify(type);
       if (!["CODEX_MESSAGE", "CODEX_OUTPUT"].includes(type))
         this.log(type === "CODEX_ERROR" ? "warn" : "info", type, jobId);
     });
@@ -106,6 +149,8 @@ export class Orchestrator {
     void this.tick();
   }
   async stop() {
+    this.sentinelDispatch?.stop();
+    this.sentinel.stop();
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     for (const r of this.running.values()) r.controller.abort();
@@ -118,7 +163,13 @@ export class Orchestrator {
       throw Error("Service stopping or maintenance in progress");
     return this.integration.integrate(input);
   }
-  async create(input: unknown) {
+  async create(
+    input: unknown,
+    beforeCreate?: (source: {
+      repository: string;
+      baseCommit: string | null;
+    }) => undefined,
+  ) {
     if (this.recovery) await this.recovery;
     if (this.restarting || maintenance(this.config.dataDir))
       throw new Error("Update maintenance in progress; retry shortly.");
@@ -136,6 +187,9 @@ export class Orchestrator {
       parsed.startRef && !prior
         ? await this.git.resolve(parsed.repository, parsed.startRef)
         : null;
+    // Optional trusted-host guard runs after asynchronous Git work, immediately
+    // before the synchronous Store transaction. Normal API callers are unchanged.
+    beforeCreate?.({ repository: parsed.repository, baseCommit });
     const job = this.store.create(parsed, baseCommit);
     void this.tick();
     return job;
@@ -151,6 +205,8 @@ export class Orchestrator {
       return;
     this.ticking = true;
     try {
+      this.sentinelDev.tick();
+      void this.sentinelDispatch?.tick();
       for (const job of this.store.list())
         if (
           !activeStatuses.includes(job.status) &&

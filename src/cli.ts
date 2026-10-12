@@ -16,6 +16,7 @@ import { GitWorkspace } from "./git.js";
 import { AppServerAdapter } from "./codex.js";
 import { AutomaticReviewer } from "./reviewer.js";
 import { Orchestrator, alive } from "./orchestrator.js";
+import { operatorSentinelHost } from "./sentinel-operator-host.js";
 import { createApp } from "./server.js";
 import { errorMessage } from "./domain.js";
 import { serveStdio } from "./stdio.js";
@@ -193,16 +194,26 @@ async function main() {
   });
   const store = new Store(path.join(c.dataDir, "codexbridge.db"));
   const adapter = new AppServerAdapter(c);
+  const git = new GitWorkspace(c);
+  let runningCore: Orchestrator | undefined;
+  const trustedHost = operatorSentinelHost(c, git, () => {
+    if (!runningCore || runningCore.restarting) return false;
+    const state = runningCore.scheduler();
+    // Discretionary Sentinel work never contends with an existing Codex job.
+    return state.runningJobs === 0 && state.pauses.length === 0;
+  });
   const core = new Orchestrator(
     c,
     store,
-    new GitWorkspace(c),
+    git,
     adapter,
     new AutomaticReviewer(
       c,
       new AppServerAdapter({ ...c, model: c.reviewerModel ?? c.model }),
     ),
+    trustedHost,
   );
+  runningCore = core;
   let closing = false;
   const close = async () => {
     if (closing) return;
