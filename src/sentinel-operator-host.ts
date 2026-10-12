@@ -47,6 +47,7 @@ export function operatorSentinelHost(
   canAdmit: (repository: string) => boolean,
   env: NodeJS.ProcessEnv = process.env,
   resourcesAllow: () => boolean = linuxPressureAllows,
+  now: () => number = Date.now,
 ): SentinelHost | undefined {
   // No filesystem, Git, CPU or credential IO in the default-off case.
   if (
@@ -123,6 +124,7 @@ export function operatorSentinelHost(
       publicKeyPem,
       git,
       repositories: parsed,
+      now,
       schedulerAllows: (repository) =>
         resourcesAllow() && canAdmit(repository),
     });

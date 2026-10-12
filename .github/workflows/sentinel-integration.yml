@@ -26,7 +26,8 @@ jobs:
           SENTINEL_EXECUTOR_GIT_TEST: '1'
           CODEXBRIDGE_TEST_SENTINEL_HTTP: '1'
           TSX_DISABLE_CACHE: '1'
-        run: node --import tsx --test --test-isolation=none --test-concurrency=1 tests/sentinel-http.test.ts tests/sentinel-dispatch.test.ts tests/sentinel-trust.test.ts tests/sentinel-operator-host.test.ts tests/sentinel-executor.test.ts
+          SENTINEL_SIGNED_E2E_GIT_TEST: '1'
+        run: node --import tsx --test --test-isolation=none --test-concurrency=1 tests/sentinel-http.test.ts tests/sentinel-dispatch.test.ts tests/sentinel-trust.test.ts tests/sentinel-operator-host.test.ts tests/sentinel-executor.test.ts tests/sentinel-signed-e2e.test.ts
 
   sentinel-windows-targeted:
     runs-on: windows-latest
