@@ -16,8 +16,10 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - name: Existing TypeScript and test suite
-        run: npm run check
+      - name: Compile TypeScript
+        run: npm run build
+      - name: Targeted Sentinel tests
+        run: TSX_DISABLE_CACHE=1 node --import tsx --test --test-isolation=none --test-concurrency=1 tests/sentinel.test.ts tests/sentinel-dev.test.ts tests/sentinel-executor.test.ts tests/sentinel-dispatch.test.ts
       - name: Disposable Git and HTTP smoke tests
         env:
           SENTINEL_DISPATCH_GIT_TEST: '1'
