@@ -1,5 +1,5 @@
 import { createPublicKey, verify, type KeyObject } from "node:crypto";
-import { constants, closeSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -65,11 +65,23 @@ function createReader(filename: string, publicKey: KeyObject) {
   return (): SignedBundlePayload => {
     // The bundle can be read by the service but never needs to be writable.
     // No symlink following, no arbitrary path from taskId or job output.
+    // Windows does not enforce POSIX O_NOFOLLOW, so reject links explicitly
+    // and compare the opened file with the post-open directory entry.
+    if (lstatSync(filename).isSymbolicLink())
+      throw Error("Symlinked authorization document denied");
     const fd = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
     let content: string;
     try {
       const stat = fstatSync(fd);
-      if (!stat.isFile() || stat.size < 1 || stat.size > 65536)
+      const location = lstatSync(filename);
+      if (
+        location.isSymbolicLink() ||
+        !stat.isFile() ||
+        stat.dev !== location.dev ||
+        stat.ino !== location.ino ||
+        stat.size < 1 ||
+        stat.size > 65536
+      )
         throw Error("Invalid signed authorization document");
       content = readFileSync(fd, "utf8");
     } finally {
