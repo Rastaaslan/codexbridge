@@ -10,6 +10,42 @@ import type { Store } from "./database.js";
 import type { Config } from "./config.js";
 import { errorMessage, type Job } from "./domain.js";
 const exec = promisify(execFile);
+// The API response is bounded, but a reviewer must never lose a single source
+// byte solely because the final patch is larger than its display preview.
+export const REVIEW_PREVIEW_LIMIT = 500000;
+export const REVIEW_SHARD_LIMIT = 180000;
+export const REVIEW_TOTAL_LIMIT = 2 * 1024 * 1024;
+export function shardReviewDiff(diff: string) {
+  if (diff.length <= REVIEW_PREVIEW_LIMIT) return null;
+  if (diff.length > REVIEW_TOTAL_LIMIT) return null; // fail closed, not a fake full review
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < diff.length) {
+    let end = Math.min(start + REVIEW_SHARD_LIMIT, diff.length);
+    if (end < diff.length) {
+      const line = diff.lastIndexOf("\n", end);
+      if (line > start + REVIEW_SHARD_LIMIT / 2) end = line + 1;
+      else {
+        const next = diff.indexOf("\n", end);
+        if (next >= 0 && next - start <= REVIEW_SHARD_LIMIT + 5000)
+          end = next + 1;
+      }
+    }
+    // Never slice in the middle of a Unicode surrogate pair.
+    if (
+      end < diff.length &&
+      /[\uD800-\uDBFF]/u.test(diff.charAt(end - 1)) &&
+      /[\uDC00-\uDFFF]/u.test(diff.charAt(end))
+    )
+      end--;
+    if (end <= start) return null;
+    chunks.push(diff.slice(start, end));
+    if (chunks.length > 16) return null;
+    start = end;
+  }
+  if (chunks.join("") !== diff) return null;
+  return chunks;
+}
 const snapshotSchema = z.strictObject({
   evidenceVersion: z.literal(2).optional(),
   baseCommit: z.string(),
@@ -136,8 +172,15 @@ export class Integration {
       snapshot.tree,
       "--",
     ]);
+    const reviewChunks = shardReviewDiff(diff);
     return {
-      diff: diff.slice(0, 500000),
+      diff: diff.slice(0, REVIEW_PREVIEW_LIMIT),
+      // Review chunks are complete and indexed to an immutable snapshot tree.
+      // They are not sent through the public get_job_diff response.
+      reviewChunks,
+      fullDiffSha256: reviewChunks
+        ? createHash("sha256").update(diff).digest("hex")
+        : null,
       changedFiles: (
         await git(job.repository, [
           ...args,
@@ -156,7 +199,7 @@ export class Integration {
         `${snapshot.baseCommit}..${snapshot.sourceCommit}`,
       ]),
       status: snapshot.status,
-      truncated: diff.length > 500000,
+      truncated: diff.length > REVIEW_PREVIEW_LIMIT,
     };
   }
   seal(id: string, snapshot: z.infer<typeof snapshotSchema>) {
