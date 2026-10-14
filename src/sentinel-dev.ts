@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Store } from "./database.js";
+import { statuses } from "./domain.js";
 import type { SentinelMini } from "./sentinel.js";
 
 const name = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
@@ -59,6 +60,7 @@ const decisionSchema = z.strictObject({
         jobId: z.string(),
         currentStatus: z.string(),
         observedStatus: z.string().nullable(),
+        durableCompletion: z.boolean().default(false),
       }),
     )
     .max(10),
@@ -74,6 +76,23 @@ export const devReportSchema = stateSchema.extend({
   observation: z.enum(["disabled", "planning", "error"]),
   policyId: name.nullable(),
 });
+
+// Historical dependencies may predate the observer's first checkpoint.
+// Verify the canonical lifecycle journal as well as the current Store status.
+// Bounded tail scan on events_job(job_id,id). Missing/contradictory proof
+// denies admission. This never emits or backfills completion events.
+const workflowEvents = new Set(statuses.map((status) => "JOB_" + status));
+function durableCompletion(store: Store, jobId: string): boolean {
+  const tail = store.db
+    .prepare(
+      "SELECT type FROM job_events WHERE job_id=? ORDER BY id DESC LIMIT 128",
+    )
+    .all(jobId) as { type: string }[];
+  return (
+    tail.find((event) => workflowEvents.has(event.type))?.type ===
+    "JOB_COMPLETED"
+  );
+}
 
 // This layer consumes Mini's bounded snapshots, never subscribes to the journal
 // or duplicates the workflow state machine. Current Store status is authoritative.
@@ -122,6 +141,9 @@ export class SentinelDev {
             jobId,
             currentStatus,
             observedStatus: event?.status ?? null,
+            durableCompletion:
+              currentStatus === "COMPLETED" &&
+              durableCompletion(this.store, jobId),
           };
         });
         let reason = "";
@@ -131,12 +153,10 @@ export class SentinelDev {
           reason = "Approved compatible source and provenance missing";
         else {
           const blocked = dependencyStates.find(
-            (d) =>
-              d.currentStatus !== "COMPLETED" ||
-              d.observedStatus !== "COMPLETED",
+            (d) => d.currentStatus !== "COMPLETED" || !d.durableCompletion,
           );
           if (blocked)
-            reason = `${blocked.jobId}: ${blocked.currentStatus}; requires current workflow completion and observed completion`;
+            reason = `${blocked.jobId}: ${blocked.currentStatus}; requires current workflow completion and durable lifecycle event`;
           // V1 has no evidence attestation writer. Event prose is not approval.
           if (!reason && task.requiredEvidence.length)
             reason = `Verified evidence required: ${task.requiredEvidence.join(", ")}`;
@@ -231,4 +251,3 @@ export function actionEligible(
     )
   );
 }
-
