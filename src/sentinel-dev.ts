@@ -27,6 +27,7 @@ export const devPolicySchema = z
         z.strictObject({
           id: name,
           operation: z.literal("code-fix"),
+          maxIterations: z.number().int().min(1).max(10).default(1),
           dependencies: z
             .array(z.string().regex(/^CB-\d+$/))
             .min(1)
@@ -42,6 +43,11 @@ export const devPolicySchema = z
   .superRefine((p, ctx) => {
     if (new Set(p.tasks.map((t) => t.id)).size !== p.tasks.length)
       ctx.addIssue({ code: "custom", message: "Duplicate task ID" });
+    if (p.tasks.reduce((sum, t) => sum + t.maxIterations, 0) > p.budget)
+      ctx.addIssue({
+        code: "custom",
+        message: "Task iteration budgets exceed policy budget",
+      });
     for (const t of p.tasks)
       if (hash(t.ticket) !== t.ticketHash)
         ctx.addIssue({ code: "custom", message: "Ticket hash mismatch" });
@@ -236,7 +242,7 @@ export function actionEligible(
     check.schedulerAllows &&
     Number.isInteger(check.usedBudget) &&
     check.usedBudget >= 0 &&
-    check.usedBudget < p.budget &&
+    check.usedBudget + task.maxIterations <= p.budget &&
     check.running === 0 &&
     Number.isFinite(check.elapsedMs) &&
     check.elapsedMs >= p.cooldownMs &&
