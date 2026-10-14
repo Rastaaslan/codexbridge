@@ -18,7 +18,7 @@ import { GitWorkspace } from "../src/git.js";
 import { configSchema } from "../src/config.js";
 import { toolDefinitions } from "../src/tools.js";
 
-function fixture(t: TestContext) {
+function fixture(t: TestContext, maxIterations = 1) {
   const dir = mkdtempSync(path.join(process.cwd(), ".sentinel-executor-"));
   const file = path.join(dir, "store.sqlite");
   let store = new Store(file);
@@ -42,10 +42,11 @@ function fixture(t: TestContext) {
       provenanceHash: "b".repeat(64),
       approvedBy: "not-authority",
     },
-    budget: 2,
+    budget: maxIterations === 1 ? 2 : maxIterations,
     concurrency: 1,
     cooldownMs: 60000,
-    tasks: ["fix1", "fix2"].map((id) => ({
+    tasks: (maxIterations === 1 ? ["fix1", "fix2"] : ["fix1"]).map((id) => ({
+      maxIterations,
       id,
       operation: "code-fix",
       dependencies: [dep.id],
@@ -296,6 +297,8 @@ test("lane concurrency, cooldown and cap cannot reset with policy or service res
   assert.equal(f.calls(), 2);
   f.store.patch(second.attempts[1].jobId!, { status: "COMPLETED" });
   f.p.tasks.push({ ...f.p.tasks[0], id: "fix3" });
+  assert.throws(() => f.make(), /iteration budgets/);
+  f.p.budget = 3;
   // Policy edits cannot erase repository-wide accounting; require investigation.
   assert.ok((await f.make().run("fix3")).blocker);
   assert.equal(f.calls(), 2);
@@ -515,6 +518,8 @@ test("temporary scheduler pressure defers and rechecks without restarting the ex
 test("budget exhausted and scheduler refusal cannot submit", async (t) => {
   const f = fixture(t);
   f.p.budget = 1;
+  assert.throws(() => devPolicySchema.parse(f.p), /iteration budgets/);
+  f.p.budget = 2;
   // Rebuild planner because a policy hash intentionally changes decision keys.
   const planner = {
     tick() {},
@@ -541,8 +546,10 @@ test("budget exhausted and scheduler refusal cannot submit", async (t) => {
   assert.match((await make().run("fix1")).blocker!, /scheduler/);
   f.ports.schedulerAllows = () => true;
   const first = await make().run("fix1");
+  assert.equal(f.store.get(first.attempts[0].jobId!).maxIterations, 1);
+  assert.match((await make().run("fix2")).blocker!, /Lane occupied/);
   f.store.patch(first.attempts[0].jobId!, { status: "COMPLETED" });
-  assert.match((await make().run("fix2")).blocker!, /cap/);
+  assert.match((await make().run("fix2")).blocker!, /cooldown/);
   assert.equal(f.calls(), 1);
 });
 
@@ -758,3 +765,70 @@ test("failed lane job remains fatal rather than becoming an ordinary deferral", 
   assert.equal(f.calls(), 1);
 });
 
+test("eight-iteration campaign creates one canonical job and reconciles without reissue", async (t) => {
+  const f = fixture(t, 8);
+  const config = configSchema.parse({
+    dataDir: f.dir,
+    token: "x".repeat(32),
+    maxRuntimeRetries: 0,
+  });
+  const core = {
+    config,
+    store: f.store,
+    git: {
+      repository: async (p: string) => p,
+      resolve: async () => f.p.source!.baseCommit,
+    },
+    tick: async () => {},
+    create: Orchestrator.prototype.create,
+  } as unknown as Orchestrator;
+  f.ports.create = coreCreatePort(core);
+  const result = await f.make().run("fix1");
+  assert.equal(result.blocker, null);
+  assert.equal(result.attempts.length, 1);
+  assert.equal(result.attempts[0].maxIterations, 8);
+  const job = f.store.get(result.attempts[0].jobId!);
+  assert.equal(job.maxIterations, 8);
+  assert.ok(["CREATED", "QUEUED"].includes(job.status));
+  f.restart();
+  const replay = await f.make().run("fix1");
+  assert.equal(replay.blocker, null);
+  assert.equal(replay.attempts[0].jobId, job.id);
+  assert.equal(
+    f.store.db
+      .prepare("SELECT count(*) AS n FROM jobs WHERE idempotency_key=?")
+      .get(result.attempts[0].key)!.n,
+    1,
+  );
+  f.p.budget = 9;
+  f.p.tasks[0].maxIterations = 9;
+  assert.match((await f.make().run("fix1")).blocker!, /mismatch/);
+  assert.equal(f.store.get(job.id).maxIterations, 8);
+});
+
+test("campaign rejects job-limit drift and preserves an ambiguous full debit", async (t) => {
+  const f = fixture(t, 8);
+  const first = await f.make().run("fix1");
+  const id = first.attempts[0].jobId!;
+  f.store.patch(id, { maxIterations: 9 });
+  assert.match((await f.make().run("fix1")).blocker!, /mismatch/);
+  assert.equal(f.calls(), 1);
+  const other = fixture(t, 8);
+  other.ports.create = async () => {
+    throw Error("synthetic lost submission");
+  };
+  await other.make().run("fix1");
+  const snapshot = other.planner.report();
+  other.restart();
+  const recovered = new SentinelExecutor(
+    other.store,
+    { tick() {}, report: () => snapshot },
+    other.p,
+    other.ports,
+    { enabled: true, repositories: [other.dir] },
+    () => 100000,
+  );
+  assert.equal(other.make().report().attempts[0].maxIterations, 8);
+  assert.match((await recovered.run("fix1")).blocker!, /unresolved/);
+  assert.equal(other.calls(), 0);
+});
