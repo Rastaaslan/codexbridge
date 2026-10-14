@@ -41,6 +41,7 @@ const attemptSchema = z.strictObject({
   taskId: z.string(),
   key: digest,
   policyHash: digest,
+  maxIterations: z.number().int().min(1).max(10).default(1),
   at: z.number().int().nonnegative(),
   state: z.enum(["reserved", "submitted"]),
   jobId: z.string().nullable(),
@@ -142,7 +143,7 @@ export class SentinelExecutor {
       repository: this.policy.repository,
       startRef: this.policy.source!.baseCommit,
       dependencies: task.dependencies,
-      options: { idempotencyKey: key, maxIterations: 1 },
+      options: { idempotencyKey: key, maxIterations: task.maxIterations },
     });
   }
   private matches(job: Job, attempt: Attempt) {
@@ -155,7 +156,8 @@ export class SentinelExecutor {
       job.title === input.title &&
       job.startRef === input.startRef &&
       job.baseCommit === input.startRef &&
-      job.maxIterations === 1 &&
+      job.maxIterations === input.options.maxIterations &&
+      attempt.maxIterations === input.options.maxIterations &&
       job.priority === input.priority &&
       job.executionCost === input.executionCost &&
       job.projectId === undefined &&
@@ -194,7 +196,10 @@ export class SentinelExecutor {
     // Reject resource pressure before reading grants or performing Git IO.
     // Recheck again after verification and at the insertion boundary.
     if (!this.ports.schedulerAllows(p.repository))
-      throw new Deferral("Canonical scheduler admission temporarily unavailable", this.now() + 60000);
+      throw new Deferral(
+        "Canonical scheduler admission temporarily unavailable",
+        this.now() + 60000,
+      );
     const grant = executionGrantSchema.safeParse(
       await this.ports.authorize(taskId),
     );
@@ -217,7 +222,10 @@ export class SentinelExecutor {
       throw new Blocker("Task authorization expired during verification");
     this.dependencies(taskId);
     if (!this.ports.schedulerAllows(p.repository))
-      throw new Deferral("Canonical scheduler admission temporarily unavailable", this.now() + 60000);
+      throw new Deferral(
+        "Canonical scheduler admission temporarily unavailable",
+        this.now() + 60000,
+      );
     this.planner.tick();
     const report = this.planner.report();
     if (
@@ -312,8 +320,13 @@ export class SentinelExecutor {
           throw new Deferral("Lane occupied; awaiting workflow completion");
         if (rows.some((a) => a.key === key))
           throw new Blocker("Action already attempted");
-        if (rows.length >= this.policy.budget)
-          throw new Blocker("Lane job cap reached");
+        if (
+          rows.reduce((sum, row) => sum + row.maxIterations, 0) +
+            this.policy.tasks.find((task) => task.id === taskId)!
+              .maxIterations >
+          this.policy.budget
+        )
+          throw new Blocker("Lane iteration budget cap reached");
         if (rows.some((a) => this.now() - a.at < this.policy.cooldownMs))
           throw new Deferral(
             "Lane cooldown active",
@@ -323,6 +336,8 @@ export class SentinelExecutor {
           taskId,
           key,
           policyHash: fingerprint,
+          maxIterations: this.policy.tasks.find((task) => task.id === taskId)!
+            .maxIterations,
           at: this.now(),
           state: "reserved",
           jobId: null,
@@ -449,4 +464,3 @@ export function coreCreatePort(
     });
   };
 }
-
