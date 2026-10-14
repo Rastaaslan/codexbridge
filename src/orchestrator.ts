@@ -441,23 +441,37 @@ export class Orchestrator {
       job = this.store.transition(id, "REVIEWING");
       const snapshot = await this.integration.snapshot(job);
       const diff = await this.integration.reviewDiff(job, snapshot);
-      const review = await this.reviewer.review(
-        { job, diff, history: this.store.reviews(id) },
-        callbacks,
-      );
+      const context = { job, diff, history: this.store.reviews(id) };
+      // Large immutable tree diffs must be fully inspected, not merely previewed.
+      // Coverage is determined by the trusted adapter, never a model claim.
+      const chunked =
+        diff.truncated && this.reviewer.reviewAllChunks
+          ? await this.reviewer.reviewAllChunks(context, callbacks)
+          : null;
+      const review = chunked
+        ? chunked.review
+        : await this.reviewer.review(context, callbacks);
+      const verifiedFullDiff =
+        !diff.truncated ||
+        !!(
+          chunked?.coverageSha256 &&
+          chunked.coverageSha256 === diff.fullDiffSha256 &&
+          diff.reviewChunks?.length
+        );
       signal.throwIfAborted();
-      // Evidence guard: a model cannot accept a known failed test run or an incomplete diff.
+      // Evidence guard: a model cannot accept known failed tests or an
+      // incomplete review. Legacy/mock reviewers without full coverage fail closed.
       if (
         review.decision === "ACCEPT" &&
         (result.status === "blocked" ||
           !result.testsPassed ||
           result.testsExecuted.length === 0 ||
-          diff.truncated)
+          !verifiedFullDiff)
       ) {
         review.decision = "REQUEST_CHANGES";
         review.requestedChanges.push(
-          diff.truncated
-            ? "Diff is incomplete; reduce scope or provide a reviewable change."
+          !verifiedFullDiff
+            ? "Full diff review coverage missing; require bounded independent segment review."
             : "Finish the implementation, run meaningful tests successfully and include the test commands in the result.",
         );
       }
