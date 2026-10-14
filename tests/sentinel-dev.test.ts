@@ -394,3 +394,69 @@ test("missing durable completion and replay gaps fail closed", (t) => {
   replayDev.tick();
   assert.match(replayDev.report().decisions[0].reason, /replay pending/);
 });
+
+test("campaign iteration allocation is normalized, signed and bounded", () => {
+  const legacy = devPolicySchema.parse(fixture);
+  assert.equal(legacy.tasks[0].maxIterations, 1);
+  const campaign = devPolicySchema.parse({
+    ...fixture,
+    budget: 8,
+    tasks: [{ ...fixture.tasks[0], maxIterations: 8 }],
+  });
+  assert.equal(campaign.tasks[0].maxIterations, 8);
+  assert.throws(
+    () => devPolicySchema.parse({ ...campaign, budget: 7 }),
+    /iteration budgets/,
+  );
+  assert.throws(() =>
+    devPolicySchema.parse({
+      ...campaign,
+      budget: 10,
+      tasks: [{ ...campaign.tasks[0], maxIterations: 11 }],
+    }),
+  );
+  assert.throws(
+    () =>
+      devPolicySchema.parse({
+        ...legacy,
+        tasks: [legacy.tasks[0], { ...legacy.tasks[0], id: "second" }],
+      }),
+    /iteration budgets/,
+  );
+  const nine = devPolicySchema.parse({
+    ...campaign,
+    budget: 9,
+    tasks: [{ ...campaign.tasks[0], maxIterations: 9 }],
+  });
+  assert.notEqual(hash(JSON.stringify(campaign)), hash(JSON.stringify(nine)));
+});
+
+test("campaign admission charges the entire requested iteration limit", (t) => {
+  const { store, mini, job, p } = setup(t);
+  p.budget = 9;
+  p.tasks[0].maxIterations = 8;
+  complete(store, job.id);
+  mini.tick();
+  const dev = new SentinelDev(store, mini, p);
+  const check: DevActionCheck = {
+    enabled: true,
+    signedOffPolicyId: p.id,
+    policyHash: hash(JSON.stringify(p)),
+    repository: p.repository,
+    baseCommit: p.source!.baseCommit,
+    provenanceHash: p.source!.provenanceHash,
+    ticketHash: p.tasks[0].ticketHash,
+    approvalsSatisfied: true,
+    stateRechecked: true,
+    schedulerAllows: true,
+    usedBudget: 1,
+    running: 0,
+    elapsedMs: p.cooldownMs,
+    alreadySubmitted: false,
+  };
+  assert.equal(actionEligible(p, p.tasks[0].id, dev.report(), check), true);
+  assert.equal(
+    actionEligible(p, p.tasks[0].id, dev.report(), { ...check, usedBudget: 2 }),
+    false,
+  );
+});
