@@ -298,3 +298,99 @@ test("maximum valid evidence diagnostics remain bounded and blocked", (t) => {
   assert.equal(dev.report().decisions[0].reason.length, 400);
 });
 
+test("historical COMPLETED dependency requires durable lifecycle, not observer backfill", (t) => {
+  const store = new Store(":memory:");
+  const job = store.create(
+    createSchema.parse({
+      title: "historical",
+      ticket: "synthetic",
+      repository: process.cwd(),
+    }),
+  );
+  complete(store, job.id); // completed before observer opt-in
+  const mini = new SentinelMini(store, true);
+  t.after(() => {
+    mini.stop();
+    store.close();
+  });
+  assert.equal(
+    mini.report().summaries.some((s) => s.jobId === job.id),
+    false,
+  );
+  const policy = devPolicySchema.parse({
+    ...fixture,
+    enabled: true,
+    source: {
+      baseCommit: "a".repeat(40),
+      provenanceHash: "b".repeat(64),
+      approvedBy: "fixture-only",
+    },
+    tasks: [
+      { ...fixture.tasks[0], dependencies: [job.id], requiredEvidence: [] },
+    ],
+  });
+  const dev = new SentinelDev(store, mini, policy);
+  dev.tick();
+  assert.equal(dev.report().decisions[0].status, "ready-for-code");
+  assert.equal(
+    dev.report().decisions[0].dependencyStates[0].observedStatus,
+    null,
+  );
+  assert.equal(
+    dev.report().decisions[0].dependencyStates[0].durableCompletion,
+    true,
+  );
+  store.patch(job.id, { status: "WAITING_FOR_HUMAN" });
+  dev.tick();
+  assert.equal(dev.report().decisions[0].status, "blocked");
+  store.patch(job.id, { status: "COMPLETED" });
+  store.event(job.id, "JOB_FAILED"); // conflicting later synthetic lifecycle
+  dev.tick();
+  assert.equal(dev.report().decisions[0].status, "blocked");
+  assert.equal(
+    dev.report().decisions[0].dependencyStates[0].durableCompletion,
+    false,
+  );
+});
+
+test("missing durable completion and replay gaps fail closed", (t) => {
+  const store = new Store(":memory:");
+  const job = store.create(
+    createSchema.parse({
+      title: "state-without-event",
+      ticket: "synthetic",
+      repository: process.cwd(),
+    }),
+  );
+  store.patch(job.id, { status: "COMPLETED" }); // synthetic state lacking a completion event
+  const mini = new SentinelMini(store, true);
+  t.after(() => {
+    mini.stop();
+    store.close();
+  });
+  const policy = devPolicySchema.parse({
+    ...fixture,
+    enabled: true,
+    source: {
+      baseCommit: "a".repeat(40),
+      provenanceHash: "b".repeat(64),
+      approvedBy: "fixture-only",
+    },
+    tasks: [
+      { ...fixture.tasks[0], dependencies: [job.id], requiredEvidence: [] },
+    ],
+  });
+  const dev = new SentinelDev(store, mini, policy);
+  dev.tick();
+  assert.equal(dev.report().decisions[0].status, "blocked");
+  assert.equal(
+    dev.report().decisions[0].dependencyStates[0].durableCompletion,
+    false,
+  );
+  const replayMini = {
+    report: () => ({ ...mini.report(), replayPending: true }),
+  } as SentinelMini;
+  const replayDev = new SentinelDev(store, replayMini, policy);
+  replayDev.tick();
+  assert.match(replayDev.report().decisions[0].reason, /replay pending/);
+});
